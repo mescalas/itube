@@ -15,9 +15,14 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyGridScope
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.itemsIndexed
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.foundation.lazy.itemsIndexed as rowItemsIndexed
 import androidx.compose.foundation.relocation.BringIntoViewResponder
 import androidx.compose.foundation.relocation.bringIntoViewResponder
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -44,6 +49,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.focusRestorer
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
@@ -55,6 +61,7 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
@@ -70,9 +77,9 @@ import com.itube.tv.AppContainer
 import com.itube.tv.data.ExploreSection
 import com.itube.tv.data.Video
 import com.itube.tv.data.YouTube
-import com.itube.tv.data.account.Shelf
 import com.itube.tv.data.db.HistoryEntity
 import com.itube.tv.data.thumbnailOf
+import com.itube.tv.data.videos
 import com.itube.tv.ui.LocalContainer
 import com.itube.tv.ui.LocalNav
 import com.itube.tv.ui.LocalShell
@@ -80,10 +87,10 @@ import com.itube.tv.ui.appViewModel
 import com.itube.tv.ui.components.Avatar
 import com.itube.tv.ui.components.DialogAction
 import com.itube.tv.ui.components.EmptyState
+import com.itube.tv.ui.components.Loading
 import com.itube.tv.ui.components.PillButton
 import com.itube.tv.ui.components.VideoCard
 import com.itube.tv.ui.components.VideoMenu
-import com.itube.tv.ui.components.shelf
 import com.itube.tv.ui.components.tryFocus
 import com.itube.tv.ui.theme.C
 import com.itube.tv.ui.theme.T
@@ -93,6 +100,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
@@ -103,8 +111,6 @@ data class HeroItem(val video: Video, val label: String)
 
 class HomeViewModel(private val c: AppContainer) : ViewModel() {
     private val repo = c.repository
-    /** Rows of the signed-in YouTube home page (empty when signed out). */
-    val shelves = MutableStateFlow<List<Shelf>>(emptyList())
     var lastFocused: String? = null
     var heroIndex = 0
 
@@ -112,43 +118,107 @@ class HomeViewModel(private val c: AppContainer) : ViewModel() {
     val feed = repo.feed(40).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
     val watchLater = repo.watchLater.map { l -> l.map { it.toVideo() } }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
-    val recommended = MutableStateFlow<List<Video>>(emptyList())
-    val music = MutableStateFlow<List<Video>>(emptyList())
 
-    val hero: StateFlow<List<HeroItem>> = combine(feed, recommended, music, shelves) { f, r, m, sh ->
-        val forYou = sh.firstOrNull()?.videos.orEmpty().filter { !it.isShort && !it.isLive }.take(6)
-        if (forYou.size >= 3) return@combine forYou.map { HeroItem(it, "POUR VOUS" + (it.channelName?.let { n -> " · " + n.uppercase() } ?: "")) }
-        val fromFeed = f.orEmpty().filter { !it.isShort }.take(5).map { HeroItem(it, "NOUVEAUTÉ · ${it.channelName.orEmpty().uppercase()}") }
-        val fill = r.take(5 - fromFeed.size.coerceAtMost(5)).map { HeroItem(it, "RECOMMANDÉ POUR VOUS") }
-        val more = if (fromFeed.size + fill.size < 3) m.take(4).map { HeroItem(it, "TENDANCE · MUSIQUE") } else emptyList()
-        (fromFeed + fill + more).take(6)
+    // ------------------------------------------------------------------ endless "Recommandé pour vous" grid
+
+    /** The recommendations grid: the account's home when signed in, else picks from the local history. */
+    val grid = MutableStateFlow<List<Video>>(emptyList())
+    val gridLoading = MutableStateFlow(true)
+    private val gridIds = HashSet<String>()
+    private var nextToken: String? = null
+    private val usedTokens = HashSet<String>()
+    /** Videos whose related videos have not been used yet: they keep the grid going once a source runs dry. */
+    private val seeds = ArrayDeque<String>()
+    private var loadingMore = false
+    private var generation = 0
+
+    val hero: StateFlow<List<HeroItem>> = combine(feed, grid) { f, g ->
+        val signedIn = c.account.signedIn
+        val fromFeed = f.orEmpty().filter { !it.isShort }.take(3).map { HeroItem(it, "NOUVEAUTÉ · ${it.channelName.orEmpty().uppercase()}") }
+        val label = if (signedIn) "POUR VOUS" else "RECOMMANDÉ POUR VOUS"
+        val fromGrid = g.filter { !it.isLive }.take(6 - fromFeed.size).map { HeroItem(it, label + (it.channelName?.let { n -> " · " + n.uppercase() } ?: "")) }
+        // Signed in, YouTube's own picks come first.
+        (if (signedIn) fromGrid + fromFeed else fromFeed + fromGrid).take(6)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     init {
-        refresh()
+        resetGrid()
         // Signing in or out changes the whole page.
-        viewModelScope.launch { c.account.state.drop(1).collect { loadShelves() } }
+        viewModelScope.launch { c.account.state.map { c.account.signedIn }.distinctUntilChanged().drop(1).collect { resetGrid() } }
     }
 
-    private fun loadShelves() {
-        if (!c.account.signedIn) {
-            shelves.value = emptyList()
-            return
-        }
+    private fun resetGrid() {
+        generation++
+        grid.value = emptyList()
+        gridIds.clear()
+        usedTokens.clear()
+        seeds.clear()
+        nextToken = null
+        loadingMore = false
+        loadMore()
+    }
+
+    private fun accept(videos: List<Video>): List<Video> {
+        val hide = c.settings.value.hideShorts
+        return videos.filter { !(hide && it.isShort) && gridIds.add(it.id) }
+    }
+
+    /** Called as the focus nears the end of the grid. */
+    fun loadMore() {
+        if (loadingMore) return
+        loadingMore = true
+        val gen = generation
+        gridLoading.value = true
         viewModelScope.launch {
-            runCatching { c.accountFeed.home() }.onSuccess { list ->
-                val hide = c.settings.value.hideShorts
-                shelves.value = list.map { sh -> sh.copy(videos = sh.videos.filter { !(hide && it.isShort) }) }.filter { it.videos.isNotEmpty() }
-            }
+            val added = runCatching { nextBatch() }.getOrDefault(emptyList())
+            if (gen != generation) return@launch
+            grid.value = grid.value + added
+            added.forEach { seeds.addLast(it.id) }
+            loadingMore = false
+            gridLoading.value = false
         }
+    }
+
+    private suspend fun nextBatch(): List<Video> {
+        val signedIn = c.account.signedIn
+        // 1. The account's home, page after page (a few pages per batch when they are small).
+        if (signedIn && (grid.value.isEmpty() || nextToken != null)) {
+            val batch = ArrayList<Video>()
+            var first = grid.value.isEmpty()
+            while (batch.size < 12 && (first || nextToken != null)) {
+                val (videos, next) = c.accountFeed.homePage(if (first) null else nextToken)
+                first = false
+                nextToken = next?.takeIf { usedTokens.add(it) }
+                batch += accept(videos)
+                if (usedTokens.size > 40) nextToken = null
+            }
+            return batch.ifEmpty { fromSeeds() }
+        }
+        // 2. Signed out, first page: what follows the videos watched lately (or the music trends).
+        if (!signedIn && grid.value.isEmpty()) {
+            val first = accept(repo.recommendations())
+            if (first.isNotEmpty()) return first
+            return accept(YouTube.explore(ExploreSection.MUSIC))
+        }
+        // 3. Then endlessly: videos related to the ones already in the grid.
+        return fromSeeds()
+    }
+
+    private suspend fun fromSeeds(): List<Video> {
+        val out = ArrayList<Video>()
+        var tries = 0
+        while (out.size < 12 && seeds.isNotEmpty() && tries < 4) {
+            tries++
+            val id = seeds.removeFirst()
+            val related = runCatching { YouTube.stream(id).relatedItems.videos() }.getOrDefault(emptyList())
+            out += accept(related.filter { !it.isLive })
+        }
+        return out
     }
 
     fun refresh() {
-        loadShelves()
-        viewModelScope.launch { recommended.value = runCatching { repo.recommendations() }.getOrDefault(recommended.value) }
-        viewModelScope.launch {
-            if (music.value.isEmpty()) music.value = runCatching { YouTube.explore(ExploreSection.MUSIC) }.getOrDefault(emptyList())
-        }
+        // Back on the home screen: new picks only if the grid has nothing yet.
+        if (grid.value.isEmpty() && !loadingMore) resetGrid()
     }
 
     fun removeFromHistory(h: HistoryEntity) {
@@ -162,20 +232,30 @@ private fun greeting(): String = when (Calendar.getInstance().get(Calendar.HOUR_
     else -> "Bonsoir"
 }
 
+private val Gutter = 56.dp
+
+/** Full-width cell that also covers the grid's side padding, so rows scroll from edge to edge. */
+private fun Modifier.bleed(): Modifier = layout { measurable, constraints ->
+    val extra = Gutter.roundToPx()
+    val placeable = measurable.measure(
+        constraints.copy(minWidth = constraints.maxWidth + 2 * extra, maxWidth = constraints.maxWidth + 2 * extra)
+    )
+    layout(constraints.maxWidth, placeable.height) { placeable.place(-extra, 0) }
+}
+
 @Composable
 fun HomeScreen() {
     val vm = appViewModel { HomeViewModel(it) }
     val cw by vm.continueWatching.collectAsState()
     val feed by vm.feed.collectAsState()
     val later by vm.watchLater.collectAsState()
-    val recommended by vm.recommended.collectAsState()
-    val music by vm.music.collectAsState()
+    val grid by vm.grid.collectAsState()
+    val gridLoading by vm.gridLoading.collectAsState()
     val hero by vm.hero.collectAsState()
-    val shelves by vm.shelves.collectAsState()
     val nav = LocalNav.current
     val shell = LocalShell.current
     val restoreRequester = remember { FocusRequester() }
-    val listState = rememberLazyListState()
+    val state = rememberLazyGridState()
     val focusManager = LocalFocusManager.current
     var menu by remember { mutableStateOf<Pair<Video, HistoryEntity?>?>(null) }
     val loaded = cw != null && feed != null
@@ -188,12 +268,18 @@ fun HomeScreen() {
             vm.refresh()
         }
     }
-    LaunchedEffect(listState) {
-        snapshotFlow { listState.firstVisibleItemIndex > 0 }.collect { shell.homeScrolled.value = it }
+    LaunchedEffect(state) {
+        snapshotFlow { state.firstVisibleItemIndex > 0 }.collect { shell.homeScrolled.value = it }
+    }
+    // Endless grid: the next batch loads while the focus approaches the end.
+    LaunchedEffect(state) {
+        snapshotFlow { (state.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0) to state.layoutInfo.totalItemsCount }
+            .distinctUntilChanged()
+            .collect { (last, total) -> if (total > 0 && last >= total - 12) vm.loadMore() }
     }
     LaunchedEffect(shell.barFocused.value) {
-        if (shell.barFocused.value && (listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > 0)) {
-            listState.animateScrollToItem(0)
+        if (shell.barFocused.value && (state.firstVisibleItemIndex > 0 || state.firstVisibleItemScrollOffset > 0)) {
+            state.animateScrollToItem(0)
         }
     }
     DisposableEffect(Unit) { onDispose { shell.homeScrolled.value = false } }
@@ -202,35 +288,47 @@ fun HomeScreen() {
 
     if (!loaded) return
 
-    val nothing = hero.isEmpty() && cw.orEmpty().isEmpty() && later.isEmpty() && music.isEmpty() && shelves.isEmpty()
+    val nothing = hero.isEmpty() && cw.orEmpty().isEmpty() && later.isEmpty() && grid.isEmpty() && !gridLoading
     if (nothing) {
         EmptyState(
             Icons.Rounded.Search,
             "Bienvenue dans iTube",
-            "Recherchez une chaîne et abonnez-vous : ses nouvelles vidéos apparaîtront ici, sans publicité.",
+            "Recherchez une chaîne et abonnez-vous, ou connectez votre compte YouTube dans les Réglages.",
             Modifier.fillMaxSize().padding(top = 76.dp),
         )
         return
     }
 
-    fun videoRow(title: String, key: String, videos: List<Video>, scope: androidx.compose.foundation.lazy.LazyListScope) {
+    fun LazyGridScope.row(title: String, key: String, videos: List<Video>, history: List<HistoryEntity>? = null) {
         if (videos.isEmpty()) return
-        scope.shelf(title, key, hint = "Maintenez OK pour plus d'options") {
-            itemsIndexed(videos, key = { _, v -> key + v.id }) { i, v ->
-                val k = "$key:${v.id}"
-                VideoCard(
-                    v,
-                    modifier = focusMod(k),
-                    onFocused = { vm.lastFocused = k },
-                    onClick = { nav.play(videos, i) },
-                    onLongClick = { menu = v to null },
-                )
+        item(key = key, span = { GridItemSpan(maxLineSpan) }) {
+            Column(Modifier.bleed()) {
+                Text(title, style = T.Title3, modifier = Modifier.padding(start = Gutter, bottom = 2.dp))
+                LazyRow(
+                    modifier = Modifier.focusRestorer(),
+                    contentPadding = PaddingValues(start = Gutter, end = Gutter, top = 16.dp, bottom = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(26.dp),
+                ) {
+                    rowItemsIndexed(videos, key = { _, v -> key + v.id }) { i, v ->
+                        val k = "$key:${v.id}"
+                        val h = history?.getOrNull(i)
+                        VideoCard(
+                            v,
+                            progress = h?.progress,
+                            modifier = focusMod(k),
+                            onFocused = { vm.lastFocused = k },
+                            onClick = { if (h != null) nav.play(listOf(v), 0, h.positionMs) else nav.play(videos, i) },
+                            onLongClick = { menu = v to h },
+                        )
+                    }
+                }
             }
         }
     }
 
-    LazyColumn(
-        state = listState,
+    LazyVerticalGrid(
+        columns = GridCells.Fixed(4),
+        state = state,
         modifier = Modifier
             .fillMaxSize()
             .focusRequester(shell.homeEntry)
@@ -240,44 +338,46 @@ fun HomeScreen() {
                 if (!focusManager.moveFocus(FocusDirection.Up)) shell.focusTabs()
                 true
             },
-        contentPadding = PaddingValues(bottom = 56.dp),
+        contentPadding = PaddingValues(start = Gutter, end = Gutter, bottom = 56.dp),
+        horizontalArrangement = Arrangement.spacedBy(26.dp),
         verticalArrangement = Arrangement.spacedBy(30.dp),
     ) {
-        item("hero") {
-            if (hero.isNotEmpty()) {
-                Hero(hero, vm, focusMod("hero")) { vm.lastFocused = "hero" }
-            } else {
-                Column(Modifier.padding(start = 56.dp, top = 96.dp)) {
-                    Text(greeting(), style = T.LargeTitle)
-                    Text("Que regardons-nous aujourd'hui ?", style = T.Title3, color = C.Text2)
+        item(key = "hero", span = { GridItemSpan(maxLineSpan) }) {
+            Box(Modifier.bleed()) {
+                if (hero.isNotEmpty()) {
+                    Hero(hero, vm, focusMod("hero")) { vm.lastFocused = "hero" }
+                } else {
+                    Column(Modifier.padding(start = Gutter, top = 96.dp)) {
+                        Text(greeting(), style = T.LargeTitle)
+                        Text("Que regardons-nous aujourd'hui ?", style = T.Title3, color = C.Text2)
+                    }
                 }
             }
         }
         val resume = cw.orEmpty()
-        if (resume.isNotEmpty()) shelf("Reprendre la lecture", "cw", hint = "Maintenez OK pour plus d'options") {
-            itemsIndexed(resume, key = { _, h -> "cw" + h.videoId }) { _, h ->
-                val k = "cw:${h.videoId}"
-                val v = h.toVideo()
-                VideoCard(
-                    v,
-                    progress = h.progress,
-                    modifier = focusMod(k),
-                    onFocused = { vm.lastFocused = k },
-                    onClick = { nav.play(listOf(v), 0, h.positionMs) },
-                    onLongClick = { menu = v to h },
-                )
-            }
+        row("Reprendre la lecture", "cw", resume.map { it.toVideo() }, resume)
+        row("Nouveautés de vos abonnements", "feed", feed.orEmpty().take(30))
+        row("À regarder plus tard", "later", later)
+
+        // What the hero already shows is not repeated below.
+        val heroIds = hero.map { it.video.id }.toSet()
+        val picks = grid.filter { it.id !in heroIds }
+        if (picks.isNotEmpty()) item(key = "gridTitle", span = { GridItemSpan(maxLineSpan) }) {
+            Text("Recommandé pour vous", style = T.Title3, modifier = Modifier.padding(top = 4.dp))
         }
-        if (shelves.isNotEmpty()) {
-            // Signed in: YouTube's own rows for this account.
-            shelves.forEachIndexed { i, sh -> videoRow(sh.title, "yt$i", sh.videos, this) }
-            videoRow("Nouveautés de vos abonnements", "feed", feed.orEmpty().take(30), this)
-            videoRow("À regarder plus tard", "later", later, this)
-        } else {
-            videoRow("Nouveautés de vos abonnements", "feed", feed.orEmpty().take(30), this)
-            videoRow("Recommandé pour vous", "reco", recommended, this)
-            videoRow("À regarder plus tard", "later", later, this)
-            videoRow("Tendances musique", "music", music, this)
+        itemsIndexed(picks, key = { _, v -> "g" + v.id }) { i, v ->
+            val k = "g:${v.id}"
+            VideoCard(
+                v,
+                width = null,
+                modifier = focusMod(k),
+                onFocused = { vm.lastFocused = k },
+                onClick = { nav.play(picks, i) },
+                onLongClick = { menu = v to null },
+            )
+        }
+        if (gridLoading) item(key = "gridLoading", span = { GridItemSpan(maxLineSpan) }) {
+            Loading(Modifier.fillMaxWidth().padding(24.dp))
         }
     }
 

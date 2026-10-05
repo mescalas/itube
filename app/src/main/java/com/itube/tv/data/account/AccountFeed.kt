@@ -23,6 +23,30 @@ class AccountFeed(private val account: YouTubeAccount) {
         return shelves.merge()
     }
 
+    /**
+     * One page of the signed-in home, flattened into a single list of videos (for the endless grid),
+     * plus the token of the next page (null at the end).
+     */
+    suspend fun homePage(continuation: String?): Pair<List<Video>, String?> {
+        val r = account.innertube(
+            "browse",
+            if (continuation == null) JSONObject().put("browseId", "default") else JSONObject().put("continuation", continuation),
+        )
+        return videos(r) to (sectionContinuation(r) ?: continuation(r))
+    }
+
+    /** Next page of the vertical list of rows (not of one row's horizontal list). */
+    private fun sectionContinuation(r: JSONObject): String? {
+        val list = (Json.findFirst(r, "sectionListContinuation") ?: Json.findFirst(r, "sectionListRenderer")) as? JSONObject
+        val conts = list?.optJSONArray("continuations") ?: return null
+        for (i in 0 until conts.length()) {
+            val c = conts.optJSONObject(i) ?: continue
+            c.optJSONObject("nextContinuationData")
+                ?.optString("continuation")?.takeIf { it.isNotBlank() }?.let { return it }
+        }
+        return null
+    }
+
     suspend fun subscriptions(): List<Video> = flat("FEsubscriptions", pages = 3)
     suspend fun history(): List<Video> = flat("FEhistory", pages = 2)
     suspend fun watchLater(): List<Video> = flat("VLWL", pages = 2)
@@ -45,6 +69,11 @@ class AccountFeed(private val account: YouTubeAccount) {
             if (on) "subscription/subscribe" else "subscription/unsubscribe",
             JSONObject().put("channelIds", JSONArray().put(channelId)).put("params", ""),
         )
+    }
+
+    /** "J'aime" / "Je n'aime pas" (a dislike also steers the recommendations away). */
+    suspend fun rate(videoId: String, like: Boolean) {
+        account.innertube(if (like) "like/like" else "like/dislike", JSONObject().put("target", JSONObject().put("videoId", videoId)))
     }
 
     suspend fun setWatchLater(videoId: String, add: Boolean) {

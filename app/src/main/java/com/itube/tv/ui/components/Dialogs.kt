@@ -27,6 +27,12 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEvent
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.ImeAction
@@ -100,9 +106,23 @@ fun ActionDialog(
     onDismiss: () -> Unit,
 ) {
     val focus = remember { FocusRequester() }
+    // Opened by a long press on OK: that press is still going on. Its repeats and its release must not
+    // click the first action, so OK is ignored until a fresh press starts.
+    var armed by remember { mutableStateOf(false) }
     Dialog(onDismissRequest = onDismiss) {
         Column(
-            Modifier.width(460.dp).clip(RoundedCornerShape(24.dp)).background(C.Surface).padding(24.dp),
+            Modifier
+                .width(460.dp)
+                .onPreviewKeyEvent { ev ->
+                    if (armed || !ev.isConfirmKey()) return@onPreviewKeyEvent false
+                    if (ev.type == KeyEventType.KeyDown && ev.nativeKeyEvent.repeatCount == 0) {
+                        armed = true
+                        false
+                    } else true
+                }
+                .clip(RoundedCornerShape(24.dp))
+                .background(C.Surface)
+                .padding(24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Text(title, style = T.Title3, maxLines = 2, overflow = TextOverflow.Ellipsis)
@@ -133,3 +153,6 @@ fun ActionDialog(
         focus.tryFocus()
     }
 }
+
+private fun KeyEvent.isConfirmKey(): Boolean =
+    key == Key.DirectionCenter || key == Key.Enter || key == Key.NumPadEnter || key == Key.ButtonA

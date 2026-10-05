@@ -34,6 +34,22 @@ fun VideoMenu(
                 }
             }
         )
+        if (container.account.signedIn) {
+            add(DialogAction("J'aime") {
+                onDismiss()
+                scope.launch {
+                    runCatching { container.accountFeed.rate(video.id, like = true) }
+                        .onSuccess { toast("Ajoutée aux vidéos « J'aime »") }.onFailure { toast("Action impossible") }
+                }
+            })
+            add(DialogAction("Je n'aime pas") {
+                onDismiss()
+                scope.launch {
+                    runCatching { container.accountFeed.rate(video.id, like = false) }
+                        .onSuccess { toast("Noté : moins de vidéos de ce type") }.onFailure { toast("Action impossible") }
+                }
+            })
+        }
         video.channelUrl?.let { url ->
             add(DialogAction("Voir la chaîne" + (video.channelName?.let { " $it" } ?: "")) { onDismiss(); nav.channel(url) })
         }
