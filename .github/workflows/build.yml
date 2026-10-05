@@ -1,0 +1,73 @@
+name: Build APK
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build release APK
+        run: ./gradlew --no-daemon assembleRelease
+
+      - name: Rename APK
+        run: |
+          mkdir -p out
+          cp app/build/outputs/apk/release/app-release.apk out/iTube.apk
+          cp app/build/outputs/apk/release/app-release.apk "out/iTube-1.0.${{ github.run_number }}.apk"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: iTube-apk
+          path: out/iTube.apk
+
+      # Notes = commit subjects since the previous release reachable from this commit (shown in the app).
+      - name: Release notes
+        if: github.ref == 'refs/heads/main'
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          prev=$(git describe --tags --abbrev=0 --match 'v*' HEAD^ 2>/dev/null || true)
+          range=${prev:+$prev..HEAD}
+          {
+            git log --no-merges --format='- %s' -n 15 ${range:-HEAD} | sed 's/ *\[release\]//'
+            echo
+            echo "---"
+            echo "APK Android TV — installez \`iTube.apk\` sur votre téléviseur (ou mettez à jour depuis Réglages › À propos)."
+            echo "Lien direct permanent : https://github.com/$REPO/releases/latest/download/iTube.apk"
+          } > out/notes.md
+          cat out/notes.md
+
+      - name: Publish release
+        # Only main publishes: the in-app updater installs whatever "latest" release has the highest number.
+        if: github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: iTube 1.0.${{ github.run_number }}
+          target_commitish: ${{ github.sha }}
+          make_latest: true
+          body_path: out/notes.md
+          files: |
+            out/iTube.apk
+            out/iTube-1.0.${{ github.run_number }}.apk
