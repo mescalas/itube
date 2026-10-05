@@ -2,6 +2,8 @@ name: UI test (Android TV emulator)
 
 on:
   workflow_dispatch:
+  # Also on a push whose commit message contains "[ui-test]".
+  push:
 
 permissions:
   contents: write
@@ -12,6 +14,7 @@ concurrency:
 
 jobs:
   ui:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[ui-test]')
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
