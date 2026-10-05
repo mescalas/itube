@@ -28,3 +28,9 @@
 -dontwarn org.conscrypt.**
 -dontwarn org.bouncycastle.**
 -dontwarn org.openjsse.**
+
+# The extractor relies on reflection in places (protobuf-lite messages, Rhino, JSON): keep it whole.
+-keep class org.schabi.newpipe.extractor.** { *; }
+-keep class com.google.protobuf.** { *; }
+-keep class com.grack.nanojson.** { *; }
+-keep class org.jsoup.** { *; }

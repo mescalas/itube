@@ -139,8 +139,13 @@ object YouTube {
     private suspend fun <T> io(block: suspend () -> T): T = withContext(Dispatchers.IO) { block() }
 }
 
-/** User-facing explanation of an extraction failure. */
-fun Throwable.describe(): String = when (this) {
+/** User-facing explanation of an extraction failure (logged with its stack trace). */
+fun Throwable.describe(): String {
+    android.util.Log.w("iTube", "extraction failed", this)
+    return explain() + "\n" + (this::class.java.simpleName + (message?.let { ": " + it.take(160) } ?: ""))
+}
+
+private fun Throwable.explain(): String = when (this) {
     is AgeRestrictedContentException -> "Vidéo soumise à une limite d'âge : impossible de la lire sans compte."
     is GeographicRestrictionException -> "Cette vidéo n'est pas disponible dans votre pays."
     is PrivateContentException -> "Cette vidéo est privée."
