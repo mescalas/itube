@@ -56,12 +56,36 @@ import com.itube.tv.ui.components.VideoMenu
 import com.itube.tv.ui.components.fullWidth
 import com.itube.tv.ui.theme.C
 import com.itube.tv.ui.theme.T
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.map
+import com.itube.tv.data.account.SignInState
+import com.itube.tv.ui.explore.Load
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
-class SubscriptionsViewModel(c: AppContainer) : ViewModel() {
+class SubscriptionsViewModel(private val c: AppContainer) : ViewModel() {
     private val repo = c.repository
+    val signedIn = c.account.state.map { it is SignInState.SignedIn }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, c.account.signedIn)
+    /** The signed-in account's subscription feed (null = not loaded / signed out). */
+    val accountFeed = MutableStateFlow<Load<List<Video>>?>(null)
+
+    init {
+        viewModelScope.launch { signedIn.collect { if (it) loadAccount() else accountFeed.value = null } }
+    }
+
+    fun loadAccount() {
+        if (accountFeed.value == null) accountFeed.value = Load.Loading
+        viewModelScope.launch {
+            accountFeed.value = try {
+                val hide = c.settings.value.hideShorts
+                Load.Ready(c.accountFeed.subscriptions().filter { !(hide && it.isShort) })
+            } catch (e: Exception) {
+                Load.Failed(e.message ?: "erreur réseau")
+            }
+        }
+    }
     val subscriptions = repo.subscriptions.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
     val feed = repo.feed(300).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
     val refreshing = repo.feedRefresh
@@ -84,6 +108,13 @@ fun SubscriptionsScreen() {
     var menu by remember { mutableStateOf<Video?>(null) }
     var channelMenu by remember { mutableStateOf<SubscriptionEntity?>(null) }
 
+    val signedIn by vm.signedIn.collectAsState()
+    val account by vm.accountFeed.collectAsState()
+    if (signedIn) {
+        AccountSubscriptions(account, onRefresh = { vm.loadAccount(); shell.toast("Actualisation…") }, onMenu = { menu = it })
+        menu?.let { VideoMenu(it, onDismiss = { menu = null }) }
+        return
+    }
     val list = subs ?: return
     if (list.isEmpty()) {
         EmptyState(
@@ -189,4 +220,33 @@ private fun ChannelChip(avatar: String?, name: String, selected: Boolean, onClic
             textAlign = TextAlign.Center,
         )
     }
+}
+
+@Composable
+private fun AccountSubscriptions(state: Load<List<Video>>?, onRefresh: () -> Unit, onMenu: (Video) -> Unit) {
+    val nav = LocalNav.current
+    val videos = (state as? Load.Ready)?.value.orEmpty()
+    VideoGrid(
+        videos = videos,
+        onClick = { i -> nav.play(videos, i) },
+        onLongClick = onMenu,
+        contentPadding = PaddingValues(start = 56.dp, end = 56.dp, top = 8.dp, bottom = 56.dp),
+        header = {
+            fullWidth("title") {
+                androidx.compose.foundation.layout.Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 8.dp)) {
+                    Text("Abonnements de votre compte YouTube", style = T.Title3, modifier = Modifier.weight(1f))
+                    PillButton("Actualiser", onClick = onRefresh, icon = Icons.Rounded.Refresh)
+                }
+            }
+            when (state) {
+                null, Load.Loading -> fullWidth("loading") { com.itube.tv.ui.components.Loading(Modifier.fillMaxSize().padding(top = 80.dp)) }
+                is Load.Failed -> fullWidth("error") {
+                    Text("Chargement impossible : ${state.message}", style = T.Callout, color = C.Text2, modifier = Modifier.padding(top = 60.dp))
+                }
+                is Load.Ready -> if (state.value.isEmpty()) fullWidth("empty") {
+                    Text("Aucune vidéo récente.", style = T.Callout, color = C.Text2, modifier = Modifier.padding(top = 60.dp))
+                }
+            }
+        },
+    )
 }

@@ -51,3 +51,6 @@ an APK artifact.
   (`app/src/main/java/org/schabi/newpipe/player/` in TeamNewPipe/NewPipe) when streams start failing.
 - Cloud containers can hit YouTube's bot checks ("Sorry…" HTML / HTTP 403 on `youtubei` endpoints): that is the
   datacenter IP, not necessarily a bug. The owner tests on their TV at home.
+- Google sign-in (`data/account/`): device flow with the YouTube TV app's OAuth client, read at runtime from
+  `youtube.com/tv`'s `m=base` script (same as SmartTube's MediaServiceCore). Signed-in data comes from InnerTube
+  with the `TVHTML5` client; `AccountFeed` parses tiles (`tileRenderer`) and the newer `lockupViewModel` tolerantly.

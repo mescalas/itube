@@ -12,6 +12,8 @@ import coil3.request.crossfade
 import com.itube.tv.data.Repository
 import com.itube.tv.data.SettingsStore
 import com.itube.tv.data.YouTube
+import com.itube.tv.data.account.AccountFeed
+import com.itube.tv.data.account.YouTubeAccount
 import com.itube.tv.data.db.AppDatabase
 import com.itube.tv.data.remote.Http
 import com.itube.tv.player.PlaybackHolder
@@ -23,7 +25,9 @@ import okio.Path.Companion.toOkioPath
 class AppContainer(app: Application) {
     val settings = SettingsStore(app)
     val db = AppDatabase.create(app)
-    val repository = Repository(db, settings)
+    val account = YouTubeAccount(app)
+    val accountFeed = AccountFeed(account)
+    val repository = Repository(db, settings, account, accountFeed)
     val player = PlayerManager(app, settings)
     val playback = PlaybackHolder()
     val updater = Updater(app, settings)

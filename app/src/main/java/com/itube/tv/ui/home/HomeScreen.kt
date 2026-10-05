@@ -70,6 +70,7 @@ import com.itube.tv.AppContainer
 import com.itube.tv.data.ExploreSection
 import com.itube.tv.data.Video
 import com.itube.tv.data.YouTube
+import com.itube.tv.data.account.Shelf
 import com.itube.tv.data.db.HistoryEntity
 import com.itube.tv.data.thumbnailOf
 import com.itube.tv.ui.LocalContainer
@@ -92,6 +93,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -99,8 +101,10 @@ import java.util.Calendar
 
 data class HeroItem(val video: Video, val label: String)
 
-class HomeViewModel(c: AppContainer) : ViewModel() {
+class HomeViewModel(private val c: AppContainer) : ViewModel() {
     private val repo = c.repository
+    /** Rows of the signed-in YouTube home page (empty when signed out). */
+    val shelves = MutableStateFlow<List<Shelf>>(emptyList())
     var lastFocused: String? = null
     var heroIndex = 0
 
@@ -111,7 +115,9 @@ class HomeViewModel(c: AppContainer) : ViewModel() {
     val recommended = MutableStateFlow<List<Video>>(emptyList())
     val music = MutableStateFlow<List<Video>>(emptyList())
 
-    val hero: StateFlow<List<HeroItem>> = combine(feed, recommended, music) { f, r, m ->
+    val hero: StateFlow<List<HeroItem>> = combine(feed, recommended, music, shelves) { f, r, m, sh ->
+        val forYou = sh.firstOrNull()?.videos.orEmpty().filter { !it.isShort && !it.isLive }.take(6)
+        if (forYou.size >= 3) return@combine forYou.map { HeroItem(it, "POUR VOUS" + (it.channelName?.let { n -> " · " + n.uppercase() } ?: "")) }
         val fromFeed = f.orEmpty().filter { !it.isShort }.take(5).map { HeroItem(it, "NOUVEAUTÉ · ${it.channelName.orEmpty().uppercase()}") }
         val fill = r.take(5 - fromFeed.size.coerceAtMost(5)).map { HeroItem(it, "RECOMMANDÉ POUR VOUS") }
         val more = if (fromFeed.size + fill.size < 3) m.take(4).map { HeroItem(it, "TENDANCE · MUSIQUE") } else emptyList()
@@ -120,9 +126,25 @@ class HomeViewModel(c: AppContainer) : ViewModel() {
 
     init {
         refresh()
+        // Signing in or out changes the whole page.
+        viewModelScope.launch { c.account.state.drop(1).collect { loadShelves() } }
+    }
+
+    private fun loadShelves() {
+        if (!c.account.signedIn) {
+            shelves.value = emptyList()
+            return
+        }
+        viewModelScope.launch {
+            runCatching { c.accountFeed.home() }.onSuccess { list ->
+                val hide = c.settings.value.hideShorts
+                shelves.value = list.map { sh -> sh.copy(videos = sh.videos.filter { !(hide && it.isShort) }) }.filter { it.videos.isNotEmpty() }
+            }
+        }
     }
 
     fun refresh() {
+        loadShelves()
         viewModelScope.launch { recommended.value = runCatching { repo.recommendations() }.getOrDefault(recommended.value) }
         viewModelScope.launch {
             if (music.value.isEmpty()) music.value = runCatching { YouTube.explore(ExploreSection.MUSIC) }.getOrDefault(emptyList())
@@ -149,6 +171,7 @@ fun HomeScreen() {
     val recommended by vm.recommended.collectAsState()
     val music by vm.music.collectAsState()
     val hero by vm.hero.collectAsState()
+    val shelves by vm.shelves.collectAsState()
     val nav = LocalNav.current
     val shell = LocalShell.current
     val restoreRequester = remember { FocusRequester() }
@@ -179,7 +202,7 @@ fun HomeScreen() {
 
     if (!loaded) return
 
-    val nothing = hero.isEmpty() && cw.orEmpty().isEmpty() && later.isEmpty() && music.isEmpty()
+    val nothing = hero.isEmpty() && cw.orEmpty().isEmpty() && later.isEmpty() && music.isEmpty() && shelves.isEmpty()
     if (nothing) {
         EmptyState(
             Icons.Rounded.Search,
@@ -245,10 +268,17 @@ fun HomeScreen() {
                 )
             }
         }
-        videoRow("Nouveautés de vos abonnements", "feed", feed.orEmpty().take(30), this)
-        videoRow("Recommandé pour vous", "reco", recommended, this)
-        videoRow("À regarder plus tard", "later", later, this)
-        videoRow("Tendances musique", "music", music, this)
+        if (shelves.isNotEmpty()) {
+            // Signed in: YouTube's own rows for this account.
+            shelves.forEachIndexed { i, sh -> videoRow(sh.title, "yt$i", sh.videos, this) }
+            videoRow("Nouveautés de vos abonnements", "feed", feed.orEmpty().take(30), this)
+            videoRow("À regarder plus tard", "later", later, this)
+        } else {
+            videoRow("Nouveautés de vos abonnements", "feed", feed.orEmpty().take(30), this)
+            videoRow("Recommandé pour vous", "reco", recommended, this)
+            videoRow("À regarder plus tard", "later", later, this)
+            videoRow("Tendances musique", "music", music, this)
+        }
     }
 
     menu?.let { (v, h) ->

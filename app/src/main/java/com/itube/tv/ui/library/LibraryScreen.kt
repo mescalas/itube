@@ -42,21 +42,42 @@ import com.itube.tv.ui.components.VideoGrid
 import com.itube.tv.ui.components.VideoMenu
 import com.itube.tv.ui.components.fullWidth
 import com.itube.tv.ui.explore.SectionPill
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
+import com.itube.tv.data.account.SignInState
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
 enum class Shelf(val label: String) { HISTORY("Historique"), LATER("À regarder plus tard"), CHANNELS("Chaînes suivies") }
 
-class LibraryViewModel(c: AppContainer) : ViewModel() {
+class LibraryViewModel(private val c: AppContainer) : ViewModel() {
     private val repo = c.repository
+    /** Signed in: history and "watch later" of the YouTube account (null = use the local ones). */
+    val accountHistory = MutableStateFlow<List<Video>?>(null)
+    val accountLater = MutableStateFlow<List<Video>?>(null)
+
+    init {
+        viewModelScope.launch {
+            c.account.state.collect { st ->
+                if (st is SignInState.SignedIn) loadAccount() else { accountHistory.value = null; accountLater.value = null }
+            }
+        }
+    }
+
+    fun loadAccount() {
+        viewModelScope.launch { runCatching { c.accountFeed.history() }.onSuccess { accountHistory.value = it } }
+        viewModelScope.launch { runCatching { c.accountFeed.watchLater() }.onSuccess { accountLater.value = it } }
+    }
     val history = repo.history().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
     val later = repo.watchLater.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
     val channels = repo.subscriptions.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     fun removeHistory(id: String) = viewModelScope.launch { repo.removeFromHistory(id) }
     fun clearHistory() = viewModelScope.launch { repo.clearHistory() }
-    fun removeLater(id: String) = viewModelScope.launch { repo.removeFromWatchLater(id) }
+    fun removeLater(id: String) = viewModelScope.launch {
+        repo.removeFromWatchLater(id)
+        accountLater.value = accountLater.value?.filter { it.id != id }
+    }
 }
 
 @Composable
@@ -65,6 +86,8 @@ fun LibraryScreen() {
     val history by vm.history.collectAsState()
     val later by vm.later.collectAsState()
     val channels by vm.channels.collectAsState()
+    val accountHistory by vm.accountHistory.collectAsState()
+    val accountLater by vm.accountLater.collectAsState()
     val nav = LocalNav.current
     val shell = LocalShell.current
     var shelf by rememberSaveable { mutableStateOf(Shelf.HISTORY) }
@@ -85,12 +108,14 @@ fun LibraryScreen() {
     when (shelf) {
         Shelf.HISTORY, Shelf.LATER -> {
             val isHistory = shelf == Shelf.HISTORY
-            val videos = if (isHistory) history.map { it.toVideo() } else later.map { it.toVideo() }
+            val videos = if (isHistory) accountHistory ?: history.map { it.toVideo() }
+            else accountLater ?: later.map { it.toVideo() }
             val progress = history.associate { it.videoId to it.progress }
             VideoGrid(
                 videos = videos,
                 onClick = { i ->
-                    val start = if (isHistory) history.getOrNull(i)?.takeIf { it.progress < 0.94f }?.positionMs ?: -1 else -1
+                    // -1: the player resumes from the local history when it knows the video.
+                    val start = if (isHistory && accountHistory == null) history.getOrNull(i)?.takeIf { it.progress < 0.94f }?.positionMs ?: -1 else -1
                     nav.play(videos, i, start)
                 },
                 progress = { progress[it.id] },

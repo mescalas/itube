@@ -6,6 +6,8 @@ import com.itube.tv.data.db.FeedEntity
 import com.itube.tv.data.db.HistoryEntity
 import com.itube.tv.data.db.SubscriptionEntity
 import com.itube.tv.data.db.WatchLaterEntity
+import com.itube.tv.data.account.AccountFeed
+import com.itube.tv.data.account.YouTubeAccount
 import com.itube.tv.data.remote.Http
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -35,7 +37,12 @@ sealed interface FeedState {
     data class Failed(val message: String) : FeedState
 }
 
-class Repository(private val db: AppDatabase, private val settings: SettingsStore) {
+class Repository(
+    private val db: AppDatabase,
+    private val settings: SettingsStore,
+    private val account: YouTubeAccount,
+    private val accountFeed: AccountFeed,
+) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val feedState = MutableStateFlow<FeedState>(FeedState.Idle)
     val feedRefresh: StateFlow<FeedState> = feedState.asStateFlow()
@@ -53,12 +60,19 @@ class Repository(private val db: AppDatabase, private val settings: SettingsStor
             SubscriptionEntity(channel.id, channel.url, channel.name, channel.avatar, System.currentTimeMillis())
         )
         scope.launch { runCatching { refreshChannel(channel.id) } }
+        syncToAccount { accountFeed.subscribe(channel.id, true) }
+    }
+
+    /** Mirrors a change to the signed-in YouTube account (best effort: the local change always stands). */
+    private fun syncToAccount(action: suspend () -> Unit) {
+        if (account.signedIn) scope.launch { runCatching { action() } }
     }
 
     suspend fun unsubscribe(channelUrl: String) {
         val id = channelIdOf(channelUrl)
         db.subscriptions().delete(id)
         db.feed().deleteChannel(id)
+        syncToAccount { accountFeed.subscribe(id, false) }
     }
 
     /** Latest uploads of all followed channels (avatars joined in), shorts hidden unless enabled. */
@@ -178,6 +192,7 @@ class Repository(private val db: AppDatabase, private val settings: SettingsStor
 
     /** Returns true when the video was added, false when it was removed. */
     suspend fun toggleWatchLater(v: Video, present: Boolean): Boolean {
+        syncToAccount { accountFeed.setWatchLater(v.id, !present) }
         if (present) {
             db.watchLater().delete(v.id)
             return false
@@ -188,7 +203,10 @@ class Repository(private val db: AppDatabase, private val settings: SettingsStor
         return true
     }
 
-    suspend fun removeFromWatchLater(id: String) = db.watchLater().delete(id)
+    suspend fun removeFromWatchLater(id: String) {
+        db.watchLater().delete(id)
+        syncToAccount { accountFeed.setWatchLater(id, false) }
+    }
 
     // ------------------------------------------------------------------ recommendations
 

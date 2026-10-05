@@ -10,6 +10,7 @@ import com.itube.tv.data.Segment
 import com.itube.tv.data.SponsorBlock
 import com.itube.tv.data.Video
 import com.itube.tv.data.YouTube
+import com.itube.tv.data.account.AccountFeed
 import com.itube.tv.data.best
 import com.itube.tv.data.describe
 import com.itube.tv.data.videos
@@ -151,9 +152,24 @@ class PlayerViewModel(private val c: AppContainer) : ViewModel() {
             }
             playStreams(info, start)
             _loading.value = false
+            startWatchReport(video.id, info.duration, start)
             if (!info.isLive() && settings.value.sponsorBlock) {
                 segments = SponsorBlock.segments(video.id, settings.value.sponsorBlockExtended)
             }
+        }
+    }
+
+    /** Signed in: what is watched goes to the YouTube account's history (so its recommendations follow). */
+    private var watchReport: AccountFeed.WatchReport? = null
+
+    private fun startWatchReport(id: String, durationSec: Long, startMs: Long) {
+        watchReport = null
+        if (!c.account.signedIn || durationSec <= 0) return
+        viewModelScope.launch {
+            val report = runCatching { c.accountFeed.startWatch(id, durationSec.toDouble()) }.getOrNull() ?: return@launch
+            if (_current.value?.id != id) return@launch
+            watchReport = report
+            runCatching { report.update(startMs / 1000.0) }
         }
     }
 
@@ -259,7 +275,11 @@ class PlayerViewModel(private val c: AppContainer) : ViewModel() {
         val position = if (finished) duration * 1000 else p.currentPosition
         if (position < 3_000 && !finished) return
         val video = d.video
-        viewModelScope.launch { repo.saveProgress(video, position, duration) }
+        val report = watchReport
+        viewModelScope.launch {
+            repo.saveProgress(video, position, duration)
+            report?.let { r -> runCatching { r.update(position / 1000.0) } }
+        }
     }
 
     fun onExit() {

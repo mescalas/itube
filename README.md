@@ -20,7 +20,12 @@ NewPipeExtractor corrigent la lecture. Vérification manuelle dans **Réglages �
 
 ## Fonctionnalités
 
-- **Sans publicité, sans compte, sans clé d'API** : les vidéos sont extraites avec
+- **Compte YouTube (facultatif)** : Réglages › Compte YouTube › Se connecter, puis saisie du code sur
+  `google.com/device` depuis le téléphone (QR code), comme SmartTube. L'accueil affiche alors les recommandations
+  du compte, et Abonnements, Historique et « À regarder plus tard » viennent du compte ; ce que vous regardez est
+  ajouté à l'historique YouTube. Ce procédé (l'app se présente comme l'application YouTube pour téléviseurs)
+  n'est pas approuvé par YouTube ; l'accès se révoque depuis myaccount.google.com › Sécurité.
+- **Sans publicité, sans clé d'API** : les vidéos sont extraites avec
   [NewPipeExtractor](https://github.com/TeamNewPipe/NewPipeExtractor) (le moteur de NewPipe).
 - **SponsorBlock** : les placements de produits intégrés aux vidéos sont sautés automatiquement (et signalés en vert
   sur la barre de progression) ; en option, l'autopromo, les intros et les « abonnez-vous ».

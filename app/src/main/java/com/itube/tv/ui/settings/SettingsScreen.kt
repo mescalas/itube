@@ -17,6 +17,7 @@ import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
+import androidx.compose.material.icons.rounded.AccountCircle
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.PlayCircle
 import androidx.compose.material.icons.rounded.Tune
@@ -43,6 +44,7 @@ import com.itube.tv.data.AppSettings
 import com.itube.tv.data.SPEEDS
 import com.itube.tv.data.YouTube
 import com.itube.tv.data.cycle
+import com.itube.tv.data.account.SignInState
 import com.itube.tv.player.Codecs
 import com.itube.tv.ui.LocalContainer
 import com.itube.tv.ui.LocalShell
@@ -53,6 +55,7 @@ import com.itube.tv.ui.theme.T
 import com.itube.tv.update.UpdateState
 
 private enum class Section(val label: String, val icon: ImageVector) {
+    ACCOUNT("Compte YouTube", Icons.Rounded.AccountCircle),
     PLAYBACK("Lecture", Icons.Rounded.PlayCircle),
     CONTENT("Contenu", Icons.Rounded.Tune),
     ABOUT("À propos", Icons.Rounded.Info),
@@ -66,7 +69,7 @@ fun speedLabel(speed: Float): String = if (speed == 1f) "Normale" else (if (spee
 
 @Composable
 fun SettingsScreen() {
-    var section by rememberSaveable { mutableStateOf(Section.PLAYBACK) }
+    var section by rememberSaveable { mutableStateOf(Section.ACCOUNT) }
     Row(Modifier.fillMaxSize().padding(start = 36.dp, end = 48.dp, top = 6.dp)) {
         Column(Modifier.width(250.dp).fillMaxHeight().focusRestorer(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Section.entries.forEach { s ->
@@ -76,6 +79,7 @@ fun SettingsScreen() {
         Spacer(Modifier.width(32.dp))
         Column(Modifier.weight(1f).fillMaxHeight()) {
             when (section) {
+                Section.ACCOUNT -> AccountSection()
                 Section.PLAYBACK -> PlaybackSection()
                 Section.CONTENT -> ContentSection()
                 Section.ABOUT -> AboutSection()
@@ -136,6 +140,56 @@ private fun rememberSettings(): Pair<AppSettings, ((AppSettings) -> AppSettings)
 }
 
 private fun onOff(b: Boolean) = if (b) "Activé" else "Désactivé"
+
+@Composable
+private fun AccountSection() {
+    val container = LocalContainer.current
+    val shell = LocalShell.current
+    val account = container.account
+    val state by account.state.collectAsState()
+    var signingIn by remember { mutableStateOf(false) }
+    var confirmOut by remember { mutableStateOf(false) }
+    SettingsList {
+        when (val s = state) {
+            is SignInState.SignedIn -> {
+                item { SettingRow("Connecté", s.account?.name ?: "Compte Google", "Accueil, abonnements, historique et « Plus tard » viennent de votre compte") {} }
+                item { SettingRow("Se déconnecter", subtitle = "Revenir aux données locales de ce téléviseur") { confirmOut = true } }
+            }
+            else -> item {
+                SettingRow("Se connecter avec Google", subtitle = "Vos recommandations, abonnements et historique YouTube", chevron = true) {
+                    account.startSignIn()
+                    signingIn = true
+                }
+            }
+        }
+        item {
+            Text(
+                "La connexion utilise le même procédé que SmartTube : iTube se présente à Google comme l'application YouTube " +
+                    "pour téléviseurs. Aucun mot de passe n'est saisi sur la télé ; vous pouvez révoquer l'accès à tout moment " +
+                    "depuis myaccount.google.com › Sécurité. Ce procédé n'est pas approuvé par YouTube.",
+                style = T.Subhead,
+                color = C.Text3,
+                modifier = Modifier.padding(start = 6.dp, top = 12.dp, end = 40.dp),
+            )
+        }
+    }
+    if (signingIn) {
+        SignInDialog(account) { name ->
+            signingIn = false
+            if (name != null || account.signedIn) shell.toast("Connecté" + (name?.let { " : $it" } ?: ""))
+        }
+    }
+    if (confirmOut) {
+        com.itube.tv.ui.components.ActionDialog(
+            "Se déconnecter ?",
+            "iTube reviendra à vos abonnements et à votre historique locaux.",
+            listOf(
+                com.itube.tv.ui.components.DialogAction("Se déconnecter", destructive = true) { confirmOut = false; account.signOut(); shell.toast("Déconnecté") },
+                com.itube.tv.ui.components.DialogAction("Annuler") { confirmOut = false },
+            ),
+        ) { confirmOut = false }
+    }
+}
 
 @Composable
 private fun PlaybackSection() {
