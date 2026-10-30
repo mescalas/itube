@@ -66,13 +66,16 @@ import com.itube.tv.ui.theme.T
 import com.itube.tv.util.formatSubscribers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.launch
 
 class ChannelViewModel(private val c: AppContainer, private val url: String) : ViewModel() {
     val page = MutableStateFlow<Load<ChannelPage>>(Load.Loading)
     val live = MutableStateFlow(false)
     val videos = MutableStateFlow<Paged<Video>?>(null)
-    val subscribed = c.repository.isSubscribed(url)
+    /** Keyed on the loaded channel's id: [url] may be a handle (/@name) while subscriptions are stored by id. */
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    val subscribed = page.flatMapLatest { p -> c.repository.isSubscribed((p as? Load.Ready)?.value?.channel?.url ?: url) }
     private var loadingMore = false
 
     init { load() }
@@ -84,6 +87,7 @@ class ChannelViewModel(private val c: AppContainer, private val url: String) : V
                 val p = YouTube.channel(url)
                 videos.value = p.videos
                 p.channel.avatar?.let { a -> c.db.subscriptions().fillAvatar(p.channel.id, a) }
+                launch { c.repository.syncSubscription(p.channel) }
                 Load.Ready(p)
             } catch (e: Exception) {
                 Load.Failed(e.describe())
@@ -115,10 +119,15 @@ class ChannelViewModel(private val c: AppContainer, private val url: String) : V
         }
     }
 
-    suspend fun toggleSubscription(isSubscribed: Boolean): Boolean {
-        val p = (page.value as? Load.Ready)?.value ?: return isSubscribed
-        if (isSubscribed) c.repository.unsubscribe(p.channel.url) else c.repository.subscribe(p.channel)
-        return !isSubscribed
+    /** Returns the message to show. */
+    suspend fun toggleSubscription(isSubscribed: Boolean): String? {
+        val ch = (page.value as? Load.Ready)?.value?.channel ?: return null
+        val synced = if (isSubscribed) c.repository.unsubscribe(ch.url) else c.repository.subscribe(ch)
+        return when {
+            !synced -> "YouTube a refusé le changement (enregistré dans iTube seulement)"
+            isSubscribed -> "Désabonné de ${ch.name}"
+            else -> "Abonné à ${ch.name}"
+        }
     }
 }
 
@@ -192,8 +201,7 @@ fun ChannelScreen(url: String) {
                                         if (subscribed) "Abonné" else "S'abonner",
                                         onClick = {
                                             scope.launch {
-                                                val now = vm.toggleSubscription(subscribed)
-                                                toast.value = if (now) "Abonné à ${ch.name}" else "Désabonné de ${ch.name}"
+                                                vm.toggleSubscription(subscribed)?.let { toast.value = it }
                                             }
                                         },
                                         icon = if (subscribed) Icons.Rounded.Check else Icons.Rounded.Add,

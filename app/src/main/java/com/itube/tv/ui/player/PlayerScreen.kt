@@ -42,7 +42,10 @@ import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.SkipNext
 import androidx.compose.material.icons.rounded.Speed
+import androidx.compose.material.icons.rounded.ThumbDown
+import androidx.compose.material.icons.rounded.ThumbDownOffAlt
 import androidx.compose.material.icons.rounded.ThumbUp
+import androidx.compose.material.icons.rounded.ThumbUpOffAlt
 import androidx.compose.material.icons.rounded.WatchLater
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -80,6 +83,7 @@ import coil3.compose.AsyncImage
 import com.itube.tv.data.Channel
 import com.itube.tv.data.SPEEDS
 import com.itube.tv.data.Segment
+import com.itube.tv.data.account.Rating
 import com.itube.tv.data.Video
 import com.itube.tv.data.thumbnailOf
 import com.itube.tv.player.VideoSurface
@@ -506,6 +510,7 @@ private fun InfoPanel(
     val scope = rememberCoroutineScope()
     val subscribed by remember(v.channelUrl) { repo.isSubscribed(v.channelUrl.orEmpty()) }.collectAsState(false)
     val inLater by remember(v.id) { repo.isInWatchLater(v.id) }.collectAsState(false)
+    val rating by vm.rating.collectAsState()
     val first = remember { FocusRequester() }
     LaunchedEffect(Unit) {
         delay(40)
@@ -576,16 +581,36 @@ private fun InfoPanel(
                             if (subscribed) "Abonné" else "S'abonner",
                             onClick = {
                                 scope.launch {
-                                    if (subscribed) {
-                                        repo.unsubscribe(url)
-                                        onToast("Désabonné de ${v.channelName.orEmpty()}")
-                                    } else {
-                                        repo.subscribe(Channel(url, v.channelName.orEmpty(), v.channelAvatar))
-                                        onToast("Abonné à ${v.channelName.orEmpty()}")
-                                    }
+                                    val synced = if (subscribed) repo.unsubscribe(url)
+                                    else repo.subscribe(Channel(url, v.channelName.orEmpty(), v.channelAvatar))
+                                    onToast(
+                                        when {
+                                            !synced -> "YouTube a refusé le changement (enregistré dans iTube seulement)"
+                                            subscribed -> "Désabonné de ${v.channelName.orEmpty()}"
+                                            else -> "Abonné à ${v.channelName.orEmpty()}"
+                                        }
+                                    )
                                 }
                             },
                             icon = if (subscribed) Icons.Rounded.Check else Icons.Rounded.Add,
+                        )
+                    }
+                }
+                rating?.let { r ->
+                    item {
+                        PillButton(
+                            "J'aime",
+                            onClick = { scope.launch { vm.toggleRating(Rating.LIKE)?.let(onToast) } },
+                            icon = if (r == Rating.LIKE) Icons.Rounded.ThumbUp else Icons.Rounded.ThumbUpOffAlt,
+                            primary = r == Rating.LIKE,
+                        )
+                    }
+                    item {
+                        PillButton(
+                            "Je n'aime pas",
+                            onClick = { scope.launch { vm.toggleRating(Rating.DISLIKE)?.let(onToast) } },
+                            icon = if (r == Rating.DISLIKE) Icons.Rounded.ThumbDown else Icons.Rounded.ThumbDownOffAlt,
+                            primary = r == Rating.DISLIKE,
                         )
                     }
                 }

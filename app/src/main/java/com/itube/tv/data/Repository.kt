@@ -1,5 +1,6 @@
 package com.itube.tv.data
 
+import android.util.Log
 import android.util.Xml
 import com.itube.tv.data.db.AppDatabase
 import com.itube.tv.data.db.FeedEntity
@@ -7,6 +8,7 @@ import com.itube.tv.data.db.HistoryEntity
 import com.itube.tv.data.db.SubscriptionEntity
 import com.itube.tv.data.db.WatchLaterEntity
 import com.itube.tv.data.account.AccountFeed
+import com.itube.tv.data.account.Rating
 import com.itube.tv.data.account.YouTubeAccount
 import com.itube.tv.data.remote.Http
 import kotlinx.coroutines.CoroutineScope
@@ -55,24 +57,61 @@ class Repository(
 
     fun isSubscribed(channelUrl: String): Flow<Boolean> = db.subscriptions().isSubscribed(channelIdOf(channelUrl))
 
-    suspend fun subscribe(channel: Channel) {
+    /** Returns false when the signed-in account refused it (the local subscription stands anyway). */
+    suspend fun subscribe(channel: Channel): Boolean {
+        addLocally(channel)
+        return onAccount { accountFeed.subscribe(channel.id, true) }
+    }
+
+    /** Returns false when the signed-in account refused it (the local unsubscription stands anyway). */
+    suspend fun unsubscribe(channelUrl: String): Boolean {
+        val id = channelIdOf(channelUrl)
+        removeLocally(id)
+        return onAccount { accountFeed.subscribe(id, false) }
+    }
+
+    /**
+     * Signed in, the account is the reference: its [subscribed] state for [channel] (fetched when
+     * not given) is copied locally, so the buttons and the local list match YouTube.
+     */
+    suspend fun syncSubscription(channel: Channel, subscribed: Boolean? = null) {
+        if (!account.signedIn) return
+        val remote = subscribed ?: runCatching { accountFeed.isSubscribed(channel.id) }.getOrNull() ?: return
+        val local = db.subscriptions().isSubscribed(channel.id).first()
+        if (remote && !local) addLocally(channel)
+        else if (!remote && local) removeLocally(channel.id)
+    }
+
+    private suspend fun addLocally(channel: Channel) {
         db.subscriptions().insert(
             SubscriptionEntity(channel.id, channel.url, channel.name, channel.avatar, System.currentTimeMillis())
         )
         scope.launch { runCatching { refreshChannel(channel.id) } }
-        syncToAccount { accountFeed.subscribe(channel.id, true) }
     }
+
+    private suspend fun removeLocally(channelId: String) {
+        db.subscriptions().delete(channelId)
+        db.feed().deleteChannel(channelId)
+    }
+
+    /** "J'aime" / "Je n'aime pas" on the account; false when YouTube refused it. */
+    suspend fun rate(videoId: String, rating: Rating, previous: Rating? = null): Boolean =
+        account.signedIn && onAccount { accountFeed.rate(videoId, rating, previous) }
 
     /** Mirrors a change to the signed-in YouTube account (best effort: the local change always stands). */
     private fun syncToAccount(action: suspend () -> Unit) {
-        if (account.signedIn) scope.launch { runCatching { action() } }
+        if (account.signedIn) scope.launch { runCatching { action() }.onFailure { Log.w("iTube", "account sync failed", it) } }
     }
 
-    suspend fun unsubscribe(channelUrl: String) {
-        val id = channelIdOf(channelUrl)
-        db.subscriptions().delete(id)
-        db.feed().deleteChannel(id)
-        syncToAccount { accountFeed.subscribe(id, false) }
+    /**
+     * Runs [action] on the signed-in account in the repository's scope, so it completes even when the
+     * screen that asked goes away. True when it went through (or when signed out: nothing to do).
+     */
+    private suspend fun onAccount(action: suspend () -> Unit): Boolean {
+        if (!account.signedIn) return true
+        return scope.async {
+            runCatching { action() }.onFailure { Log.w("iTube", "account action failed", it) }.isSuccess
+        }.await()
     }
 
     /** Latest uploads of all followed channels (avatars joined in), shorts hidden unless enabled. */

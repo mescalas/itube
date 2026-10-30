@@ -19,6 +19,9 @@ import com.itube.tv.data.remote.Http
 import com.itube.tv.player.PlaybackHolder
 import com.itube.tv.player.PlayerManager
 import com.itube.tv.update.Updater
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import okio.Path.Companion.toOkioPath
 
@@ -31,6 +34,9 @@ class AppContainer(app: Application) {
     val player = PlayerManager(app, settings)
     val playback = PlaybackHolder()
     val updater = Updater(app, settings)
+
+    /** For work started from a dialog or menu that must finish after it closes (a composable's scope dies with it). */
+    val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     /** YouTube link opened with iTube from another app, waiting for the UI to handle it. */
     val pendingLink = MutableStateFlow<String?>(null)

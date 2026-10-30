@@ -4,10 +4,15 @@ import com.itube.tv.data.Video
 import com.itube.tv.data.thumbnailOf
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.IOException
 import java.security.SecureRandom
 
 /** A row of the signed-in home page ("Recommandé", "Musique", "Mix", …). */
 data class Shelf(val title: String, val videos: List<Video>)
+
+enum class Rating { LIKE, DISLIKE, NONE }
+
+data class VideoState(val rating: Rating?, val subscribed: Boolean?)
 
 /** Reads the signed-in user's YouTube (TV client) and reports what they watch so recommendations follow. */
 class AccountFeed(private val account: YouTubeAccount) {
@@ -65,16 +70,49 @@ class AccountFeed(private val account: YouTubeAccount) {
     // ------------------------------------------------------------------ actions
 
     suspend fun subscribe(channelId: String, on: Boolean) {
+        if (!channelId.startsWith("UC")) throw IOException("identifiant de chaîne inconnu ($channelId)")
         account.innertube(
             if (on) "subscription/subscribe" else "subscription/unsubscribe",
             JSONObject().put("channelIds", JSONArray().put(channelId)).put("params", ""),
         )
     }
 
-    /** "J'aime" / "Je n'aime pas" (a dislike also steers the recommendations away). */
-    suspend fun rate(videoId: String, like: Boolean) {
-        account.innertube(if (like) "like/like" else "like/dislike", JSONObject().put("target", JSONObject().put("videoId", videoId)))
+    /**
+     * "J'aime" / "Je n'aime pas" (a dislike also steers the recommendations away), or [Rating.NONE] to
+     * take back the [previous] one.
+     */
+    suspend fun rate(videoId: String, rating: Rating, previous: Rating? = null) {
+        val endpoint = when (rating) {
+            Rating.LIKE -> "like/like"
+            Rating.DISLIKE -> "like/dislike"
+            Rating.NONE -> if (previous == Rating.DISLIKE) "like/removedislike" else "like/removelike"
+        }
+        account.innertube(endpoint, JSONObject().put("target", JSONObject().put("videoId", videoId)))
     }
+
+    /** The account's rating of a video and whether it follows its channel (null when YouTube doesn't say). */
+    suspend fun videoState(videoId: String): VideoState {
+        val r = account.innertube("next", JSONObject().put("videoId", videoId))
+        val meta = Json.findFirst(r, "videoMetadataRenderer") as? JSONObject
+        val rating = when (Json.findFirst(meta ?: r, "likeStatus") as? String) {
+            "LIKE" -> Rating.LIKE
+            "DISLIKE" -> Rating.DISLIKE
+            "INDIFFERENT" -> Rating.NONE
+            else -> null
+        }
+        val owner = Json.findFirst(meta ?: r, "videoOwnerRenderer") as? JSONObject
+        val subscribed = owner?.let {
+            (it.opt("subscribed") ?: it.optJSONObject("subscriptionButton")?.opt("subscribed")) as? Boolean ?: subscribed(it)
+        } ?: subscribed(r)
+        return VideoState(rating, subscribed)
+    }
+
+    /** Whether the account follows [channelId] (null when the channel page doesn't say). */
+    suspend fun isSubscribed(channelId: String): Boolean? =
+        subscribed(account.innertube("browse", JSONObject().put("browseId", channelId)))
+
+    private fun subscribed(node: Any?): Boolean? =
+        (Json.findFirst(node, "subscribeButtonRenderer") as? JSONObject)?.opt("subscribed") as? Boolean
 
     suspend fun setWatchLater(videoId: String, add: Boolean) {
         val action = if (add) JSONObject().put("action", "ACTION_ADD_VIDEO").put("addedVideoId", videoId)

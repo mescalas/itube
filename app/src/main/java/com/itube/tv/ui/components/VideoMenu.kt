@@ -4,8 +4,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import com.itube.tv.data.Video
+import com.itube.tv.data.account.Rating
 import com.itube.tv.ui.LocalContainer
 import com.itube.tv.ui.LocalNav
 import com.itube.tv.ui.LocalShell
@@ -21,7 +21,8 @@ fun VideoMenu(
 ) {
     val container = LocalContainer.current
     val nav = LocalNav.current
-    val scope = rememberCoroutineScope()
+    // The menu leaves the composition as soon as an entry is picked: its own scope would cancel the work.
+    val scope = container.scope
     val inWatchLater by remember(video.id) { container.repository.isInWatchLater(video.id) }.collectAsState(false)
     val actions = buildList {
         add(DialogAction("Lire") { onDismiss(); nav.play(listOf(video), 0) })
@@ -38,15 +39,19 @@ fun VideoMenu(
             add(DialogAction("J'aime") {
                 onDismiss()
                 scope.launch {
-                    runCatching { container.accountFeed.rate(video.id, like = true) }
-                        .onSuccess { toast("Ajoutée aux vidéos « J'aime »") }.onFailure { toast("Action impossible") }
+                    toast(
+                        if (container.repository.rate(video.id, Rating.LIKE)) "Ajoutée aux vidéos « J'aime »"
+                        else "YouTube a refusé le « J'aime »"
+                    )
                 }
             })
             add(DialogAction("Je n'aime pas") {
                 onDismiss()
                 scope.launch {
-                    runCatching { container.accountFeed.rate(video.id, like = false) }
-                        .onSuccess { toast("Noté : moins de vidéos de ce type") }.onFailure { toast("Action impossible") }
+                    toast(
+                        if (container.repository.rate(video.id, Rating.DISLIKE)) "Noté : moins de vidéos de ce type"
+                        else "YouTube a refusé le « Je n'aime pas »"
+                    )
                 }
             })
         }

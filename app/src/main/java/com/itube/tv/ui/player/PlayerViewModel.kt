@@ -5,12 +5,14 @@ import androidx.lifecycle.viewModelScope
 import androidx.media3.common.C
 import androidx.media3.common.PlaybackException
 import com.itube.tv.AppContainer
+import com.itube.tv.data.Channel
 import com.itube.tv.data.CodecPref
 import com.itube.tv.data.Segment
 import com.itube.tv.data.SponsorBlock
 import com.itube.tv.data.Video
 import com.itube.tv.data.YouTube
 import com.itube.tv.data.account.AccountFeed
+import com.itube.tv.data.account.Rating
 import com.itube.tv.data.best
 import com.itube.tv.data.describe
 import com.itube.tv.data.videos
@@ -71,6 +73,10 @@ class PlayerViewModel(private val c: AppContainer) : ViewModel() {
     val notice: StateFlow<String?> = _notice.asStateFlow()
     fun consumeNotice() { _notice.value = null }
 
+    private val _rating = MutableStateFlow<Rating?>(null)
+    /** The signed-in account's rating of the current video (null = signed out or not known yet). */
+    val rating: StateFlow<Rating?> = _rating.asStateFlow()
+
     private val _finished = MutableStateFlow(false)
     /** The queue is over and nothing plays next: the screen closes. */
     val finished: StateFlow<Boolean> = _finished.asStateFlow()
@@ -106,6 +112,7 @@ class PlayerViewModel(private val c: AppContainer) : ViewModel() {
         _current.value = video
         _loading.value = true
         _details.value = null
+        if (!fresh) _rating.value = null
         segments = emptyList()
         skipped.clear()
         loadJob?.cancel()
@@ -131,6 +138,7 @@ class PlayerViewModel(private val c: AppContainer) : ViewModel() {
                 isLive = info.isLive(),
             )
             _current.value = enriched
+            if (!fresh) loadAccountState(enriched)
             val hideShorts = settings.value.hideShorts
             _details.value = Details(
                 info = info,
@@ -156,6 +164,36 @@ class PlayerViewModel(private val c: AppContainer) : ViewModel() {
             if (!info.isLive() && settings.value.sponsorBlock) {
                 segments = SponsorBlock.segments(video.id, settings.value.sponsorBlockExtended)
             }
+        }
+    }
+
+    /** Signed in: the video's rating, and the channel's subscription mirrored from the account. */
+    private fun loadAccountState(video: Video) {
+        if (!c.account.signedIn) return
+        viewModelScope.launch {
+            val state = runCatching { c.accountFeed.videoState(video.id) }
+                .onFailure { android.util.Log.w("iTube", "video state failed", it) }.getOrNull()
+            if (_current.value?.id != video.id) return@launch
+            _rating.value = state?.rating ?: Rating.NONE
+            val url = video.channelUrl ?: return@launch
+            repo.syncSubscription(Channel(url, video.channelName.orEmpty(), video.channelAvatar), state?.subscribed)
+        }
+    }
+
+    /** Applies [target] (or takes it back when already set). Returns the message to show. */
+    suspend fun toggleRating(target: Rating): String? {
+        val id = _current.value?.id ?: return null
+        val old = _rating.value ?: Rating.NONE
+        val new = if (old == target) Rating.NONE else target
+        _rating.value = new
+        if (!repo.rate(id, new, old)) {
+            if (_current.value?.id == id) _rating.value = old
+            return "YouTube a refusé l'action"
+        }
+        return when (new) {
+            Rating.LIKE -> "Ajoutée aux vidéos « J'aime »"
+            Rating.DISLIKE -> "Noté : moins de vidéos de ce type"
+            Rating.NONE -> "Note retirée"
         }
     }
 
