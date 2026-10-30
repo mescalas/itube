@@ -1,50 +1,46 @@
 package com.itube.tv.ui.home
 
 import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.BringIntoViewSpec
+import androidx.compose.foundation.gestures.LocalBringIntoViewSpec
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.GridItemSpan
-import androidx.compose.foundation.lazy.grid.LazyGridScope
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.itemsIndexed
-import androidx.compose.foundation.lazy.grid.rememberLazyGridState
-import androidx.compose.foundation.lazy.itemsIndexed as rowItemsIndexed
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.relocation.BringIntoViewResponder
 import androidx.compose.foundation.relocation.bringIntoViewResponder
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Add
-import androidx.compose.material.icons.rounded.Check
-import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.composed
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.FocusRequester
@@ -55,17 +51,18 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -77,15 +74,13 @@ import com.itube.tv.AppContainer
 import com.itube.tv.data.ExploreSection
 import com.itube.tv.data.Video
 import com.itube.tv.data.YouTube
-import com.itube.tv.data.db.HistoryEntity
+import com.itube.tv.data.account.Shelf
 import com.itube.tv.data.thumbnailOf
-import com.itube.tv.data.videos
-import com.itube.tv.ui.LocalContainer
 import com.itube.tv.ui.LocalNav
 import com.itube.tv.ui.LocalShell
+import com.itube.tv.ui.Tab
 import com.itube.tv.ui.appViewModel
 import com.itube.tv.ui.components.Avatar
-import com.itube.tv.ui.components.DialogAction
 import com.itube.tv.ui.components.EmptyState
 import com.itube.tv.ui.components.Loading
 import com.itube.tv.ui.components.PillButton
@@ -95,6 +90,9 @@ import com.itube.tv.ui.components.tryFocus
 import com.itube.tv.ui.theme.C
 import com.itube.tv.ui.theme.T
 import com.itube.tv.util.metaLine
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -105,160 +103,124 @@ import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
-import java.util.Calendar
 
-data class HeroItem(val video: Video, val label: String)
+/** One row of the home page; [twoLines] shelves show ten videos on two lines instead of a scrolling row. */
+data class HomeShelf(val key: String, val title: String, val videos: List<Video>, val twoLines: Boolean = false)
 
 class HomeViewModel(private val c: AppContainer) : ViewModel() {
     private val repo = c.repository
     var lastFocused: String? = null
-    var heroIndex = 0
 
-    val continueWatching = repo.continueWatching().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
-    val feed = repo.feed(40).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
-    val watchLater = repo.watchLater.map { l -> l.map { it.toVideo() } }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
-
-    // ------------------------------------------------------------------ endless "Recommandé pour vous" grid
-
-    /** The recommendations grid: the account's home when signed in, else picks from the local history. */
-    val grid = MutableStateFlow<List<Video>>(emptyList())
-    val gridLoading = MutableStateFlow(true)
-    private val gridIds = HashSet<String>()
-    private var nextToken: String? = null
-    private val usedTokens = HashSet<String>()
-    /** Videos whose related videos have not been used yet: they keep the grid going once a source runs dry. */
-    private val seeds = ArrayDeque<String>()
-    private var loadingMore = false
+    /** YouTube's shelves (the account's home, or trends and history-based picks when signed out); null while loading. */
+    private val remote = MutableStateFlow<List<Shelf>?>(null)
     private var generation = 0
 
-    val hero: StateFlow<List<HeroItem>> = combine(feed, grid) { f, g ->
-        val signedIn = c.account.signedIn
-        val fromFeed = f.orEmpty().filter { !it.isShort }.take(3).map { HeroItem(it, "NOUVEAUTÉ · ${it.channelName.orEmpty().uppercase()}") }
-        val label = if (signedIn) "POUR VOUS" else "RECOMMANDÉ POUR VOUS"
-        val fromGrid = g.filter { !it.isLive }.take(6 - fromFeed.size).map { HeroItem(it, label + (it.channelName?.let { n -> " · " + n.uppercase() } ?: "")) }
-        // Signed in, YouTube's own picks come first.
-        (if (signedIn) fromGrid + fromFeed else fromFeed + fromGrid).take(6)
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    /** How far each watched video got: a red line on its thumbnail (the player resumes from there). */
+    val progress: StateFlow<Map<String, Float>> = repo.history(300)
+        .map { l -> l.associate { it.videoId to it.progress } }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyMap())
+
+    val shelves: StateFlow<List<HomeShelf>?> = combine(
+        remote,
+        repo.feed(40),
+        repo.watchLater.map { l -> l.map { it.toVideo() } },
+    ) { r, feed, later -> r?.let { arrange(it, feed, later) } }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
     init {
-        resetGrid()
+        load()
         // Signing in or out changes the whole page.
-        viewModelScope.launch { c.account.state.map { c.account.signedIn }.distinctUntilChanged().drop(1).collect { resetGrid() } }
+        viewModelScope.launch { c.account.state.map { c.account.signedIn }.distinctUntilChanged().drop(1).collect { load() } }
     }
 
-    private fun resetGrid() {
-        generation++
-        grid.value = emptyList()
-        gridIds.clear()
-        usedTokens.clear()
-        seeds.clear()
-        nextToken = null
-        loadingMore = false
-        loadMore()
-    }
-
-    private fun accept(videos: List<Video>): List<Video> {
-        val hide = c.settings.value.hideShorts
-        return videos.filter { !(hide && it.isShort) && gridIds.add(it.id) }
-    }
-
-    /** Called as the focus nears the end of the grid. */
-    fun loadMore() {
-        if (loadingMore) return
-        loadingMore = true
-        val gen = generation
-        gridLoading.value = true
+    fun load() {
+        val gen = ++generation
+        remote.value = null
         viewModelScope.launch {
-            val added = runCatching { nextBatch() }.getOrDefault(emptyList())
-            if (gen != generation) return@launch
-            grid.value = grid.value + added
-            added.forEach { seeds.addLast(it.id) }
-            loadingMore = false
-            gridLoading.value = false
+            val shelves = runCatching { fetch() }.getOrDefault(emptyList())
+            if (gen == generation) remote.value = shelves
         }
     }
 
-    private suspend fun nextBatch(): List<Video> {
-        val signedIn = c.account.signedIn
-        // 1. The account's home, page after page (a few pages per batch when they are small).
-        if (signedIn && (grid.value.isEmpty() || nextToken != null)) {
-            val batch = ArrayList<Video>()
-            var first = grid.value.isEmpty()
-            while (batch.size < 12 && (first || nextToken != null)) {
-                val (videos, next) = c.accountFeed.homePage(if (first) null else nextToken)
-                first = false
-                nextToken = next?.takeIf { usedTokens.add(it) }
-                batch += accept(videos)
-                if (usedTokens.size > 40) nextToken = null
-            }
-            return batch.ifEmpty { fromSeeds() }
-        }
-        // 2. Signed out, first page: what follows the videos watched lately (or the music trends).
-        if (!signedIn && grid.value.isEmpty()) {
-            val first = accept(repo.recommendations())
-            if (first.isNotEmpty()) return first
-            return accept(YouTube.explore(ExploreSection.MUSIC))
-        }
-        // 3. Then endlessly: videos related to the ones already in the grid.
-        return fromSeeds()
-    }
-
-    private suspend fun fromSeeds(): List<Video> {
-        val out = ArrayList<Video>()
-        var tries = 0
-        while (out.size < 12 && seeds.isNotEmpty() && tries < 4) {
-            tries++
-            val id = seeds.removeFirst()
-            val related = runCatching { YouTube.stream(id).relatedItems.videos() }.getOrDefault(emptyList())
-            out += accept(related.filter { !it.isLive })
-        }
-        return out
-    }
-
+    /** Back on the home screen: try again only if YouTube gave nothing. */
     fun refresh() {
-        // Back on the home screen: new picks only if the grid has nothing yet.
-        if (grid.value.isEmpty() && !loadingMore) resetGrid()
+        if (remote.value?.isEmpty() == true) load()
     }
 
-    fun removeFromHistory(h: HistoryEntity) {
-        viewModelScope.launch { repo.removeFromHistory(h.videoId) }
+    private suspend fun fetch(): List<Shelf> {
+        if (c.account.signedIn) {
+            return c.accountFeed.home().map { if (it.title == "Suggestions") it.copy(title = "Pour vous") else it }
+        }
+        // Signed out: what follows the videos watched lately, then the trends of a few sections.
+        return coroutineScope {
+            val picks = async { runCatching { repo.recommendations() }.getOrDefault(emptyList()) }
+            val sections = listOf(ExploreSection.MUSIC, ExploreSection.GAMING, ExploreSection.PODCASTS).map { s ->
+                async { Shelf(s.label, runCatching { YouTube.explore(s) }.getOrDefault(emptyList())) }
+            }
+            listOf(Shelf("Pour vous", picks.await())) + sections.awaitAll()
+        }
     }
-}
 
-private fun greeting(): String = when (Calendar.getInstance().get(Calendar.HOUR_OF_DAY)) {
-    in 5..11 -> "Bonjour"
-    in 12..17 -> "Bon après-midi"
-    else -> "Bonsoir"
+    /**
+     * YouTube's first shelf leads on two lines, then the subscriptions, two more of YouTube's, Watch later,
+     * and the rest; the fifth shelf goes on two lines too, so the page alternates blocks and rows.
+     */
+    private fun arrange(remote: List<Shelf>, feed: List<Video>, later: List<Video>): List<HomeShelf> {
+        val hide = c.settings.value.hideShorts
+        fun clean(videos: List<Video>) = videos.filter { !(hide && it.isShort) }
+        val yt = remote.map { HomeShelf("yt:" + it.title, it.title, clean(it.videos)) }.filter { it.videos.size >= 2 }
+        val local = listOf(
+            HomeShelf("feed", "Nouveautés de vos abonnements", clean(feed).take(20)),
+            HomeShelf("later", "À regarder plus tard", later),
+        ).filter { it.videos.isNotEmpty() }
+        val ordered = yt.take(1) + local.take(1) + yt.drop(1).take(2) + local.drop(1) + yt.drop(3)
+        return ordered.mapIndexed { i, s ->
+            if ((i == 0 || i == 4) && s.videos.size >= BlockSize) s.copy(twoLines = true, videos = s.videos.take(BlockSize)) else s
+        }
+    }
 }
 
 private val Gutter = 56.dp
+private const val BlockSize = 10
+private const val BlockColumns = 5
+private val PreviewHeight = 280.dp
+/** Where the shelves start under the preview, and how far they rise when the preview folds over a two-line block. */
+private val RowsTop = 262.dp
+private val Fold = 150.dp
 
-/** Full-width cell that also covers the grid's side padding, so rows scroll from edge to edge. */
-private fun Modifier.bleed(): Modifier = layout { measurable, constraints ->
-    val extra = Gutter.roundToPx()
-    val placeable = measurable.measure(
-        constraints.copy(minWidth = constraints.maxWidth + 2 * extra, maxWidth = constraints.maxWidth + 2 * extra)
-    )
-    layout(constraints.maxWidth, placeable.height) { placeable.place(-extra, 0) }
+/** The focused shelf goes to the top of the list (the default only scrolls it just into view). */
+private object AlignToTop : BringIntoViewSpec {
+    override fun calculateScrollDistance(offset: Float, size: Float, containerSize: Float): Float = offset
+}
+
+/** Whatever card inside takes the focus, the list is asked to show the whole shelf, title included. */
+private fun Modifier.wholeShelfIntoView(): Modifier = composed {
+    var size by remember { mutableStateOf(IntSize.Zero) }
+    val responder = remember {
+        object : BringIntoViewResponder {
+            override fun calculateRectForParent(localRect: Rect): Rect = Rect(Offset.Zero, size.toSize())
+            override suspend fun bringChildIntoView(localRect: () -> Rect?) {}
+        }
+    }
+    onSizeChanged { size = it }.bringIntoViewResponder(responder)
 }
 
 @Composable
 fun HomeScreen() {
     val vm = appViewModel { HomeViewModel(it) }
-    val cw by vm.continueWatching.collectAsState()
-    val feed by vm.feed.collectAsState()
-    val later by vm.watchLater.collectAsState()
-    val grid by vm.grid.collectAsState()
-    val gridLoading by vm.gridLoading.collectAsState()
-    val hero by vm.hero.collectAsState()
+    val shelves by vm.shelves.collectAsState()
+    val progress by vm.progress.collectAsState()
     val nav = LocalNav.current
     val shell = LocalShell.current
     val restoreRequester = remember { FocusRequester() }
-    val state = rememberLazyGridState()
+    val firstRequester = remember { FocusRequester() }
+    val state = rememberLazyListState()
     val focusManager = LocalFocusManager.current
-    var menu by remember { mutableStateOf<Pair<Video, HistoryEntity?>?>(null) }
-    val loaded = cw != null && feed != null
+    var menu by remember { mutableStateOf<Video?>(null) }
+    var preview by remember { mutableStateOf<Pair<Video, String>?>(null) }
+    var inBlock by remember { mutableStateOf(false) }
+    var refocus by remember { mutableStateOf(false) }
+    val loaded = shelves != null
 
     LaunchedEffect(loaded) {
         if (loaded && nav.restoreFocus) {
@@ -267,29 +229,25 @@ fun HomeScreen() {
             nav.restoreFocus = false
             vm.refresh()
         }
-    }
-    LaunchedEffect(state) {
-        snapshotFlow { state.firstVisibleItemIndex > 0 }.collect { shell.homeScrolled.value = it }
-    }
-    // Endless grid: the next batch loads while the focus approaches the end.
-    LaunchedEffect(state) {
-        snapshotFlow { (state.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0) to state.layoutInfo.totalItemsCount }
-            .distinctUntilChanged()
-            .collect { (last, total) -> if (total > 0 && last >= total - 12) vm.loadMore() }
+        // "Actualiser": the new page starts on its first video.
+        if (loaded && refocus) {
+            delay(80)
+            firstRequester.tryFocus()
+            refocus = false
+        }
     }
     LaunchedEffect(shell.barFocused.value) {
+        if (shell.barFocused.value) inBlock = false
         if (shell.barFocused.value && (state.firstVisibleItemIndex > 0 || state.firstVisibleItemScrollOffset > 0)) {
             state.animateScrollToItem(0)
         }
     }
-    DisposableEffect(Unit) { onDispose { shell.homeScrolled.value = false } }
 
-    fun focusMod(key: String): Modifier = if (key == vm.lastFocused) Modifier.focusRequester(restoreRequester) else Modifier
-
-    if (!loaded) return
-
-    val nothing = hero.isEmpty() && cw.orEmpty().isEmpty() && later.isEmpty() && grid.isEmpty() && !gridLoading
-    if (nothing) {
+    val list = shelves ?: run {
+        Loading(Modifier.fillMaxSize().padding(top = 76.dp))
+        return
+    }
+    if (list.isEmpty()) {
         EmptyState(
             Icons.Rounded.Search,
             "Bienvenue dans iTube",
@@ -299,216 +257,169 @@ fun HomeScreen() {
         return
     }
 
-    fun LazyGridScope.row(title: String, key: String, videos: List<Video>, history: List<HistoryEntity>? = null) {
-        if (videos.isEmpty()) return
-        item(key = key, span = { GridItemSpan(maxLineSpan) }) {
-            Column(Modifier.bleed()) {
-                Text(title, style = T.Title3, modifier = Modifier.padding(start = Gutter, bottom = 2.dp))
-                LazyRow(
-                    modifier = Modifier.focusRestorer(),
-                    contentPadding = PaddingValues(start = Gutter, end = Gutter, top = 16.dp, bottom = 8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(26.dp),
-                ) {
-                    rowItemsIndexed(videos, key = { _, v -> key + v.id }) { i, v ->
-                        val k = "$key:${v.id}"
-                        val h = history?.getOrNull(i)
-                        VideoCard(
-                            v,
-                            progress = h?.progress,
-                            modifier = focusMod(k),
-                            onFocused = { vm.lastFocused = k },
-                            onClick = { if (h != null) nav.play(listOf(v), 0, h.positionMs) else nav.play(videos, i) },
-                            onLongClick = { menu = v to h },
-                        )
-                    }
-                }
-            }
-        }
-    }
+    fun focusMod(key: String): Modifier = if (key == vm.lastFocused) Modifier.focusRequester(restoreRequester) else Modifier
 
-    LazyVerticalGrid(
-        columns = GridCells.Fixed(4),
-        state = state,
-        modifier = Modifier
-            .fillMaxSize()
-            .focusRequester(shell.homeEntry)
-            // Scrolled back to the top, the hero sits under the tab bar: "up" finds nothing above it, so go to the bar.
-            .onPreviewKeyEvent { ev ->
-                if (ev.type != KeyEventType.KeyDown || ev.key != Key.DirectionUp) return@onPreviewKeyEvent false
-                if (!focusManager.moveFocus(FocusDirection.Up)) shell.focusTabs()
-                true
-            },
-        contentPadding = PaddingValues(start = Gutter, end = Gutter, bottom = 56.dp),
-        horizontalArrangement = Arrangement.spacedBy(26.dp),
-        verticalArrangement = Arrangement.spacedBy(30.dp),
-    ) {
-        item(key = "hero", span = { GridItemSpan(maxLineSpan) }) {
-            Box(Modifier.bleed()) {
-                if (hero.isNotEmpty()) {
-                    Hero(hero, vm, focusMod("hero")) { vm.lastFocused = "hero" }
-                } else {
-                    Column(Modifier.padding(start = Gutter, top = 96.dp)) {
-                        Text(greeting(), style = T.LargeTitle)
-                        Text("Que regardons-nous aujourd'hui ?", style = T.Title3, color = C.Text2)
-                    }
-                }
-            }
-        }
-        val resume = cw.orEmpty()
-        row("Reprendre la lecture", "cw", resume.map { it.toVideo() }, resume)
-        row("Nouveautés de vos abonnements", "feed", feed.orEmpty().take(30))
-        row("À regarder plus tard", "later", later)
-
-        // What the hero already shows is not repeated below.
-        val heroIds = hero.map { it.video.id }.toSet()
-        val picks = grid.filter { it.id !in heroIds }
-        if (picks.isNotEmpty()) item(key = "gridTitle", span = { GridItemSpan(maxLineSpan) }) {
-            Text("Recommandé pour vous", style = T.Title3, modifier = Modifier.padding(top = 4.dp))
-        }
-        itemsIndexed(picks, key = { _, v -> "g" + v.id }) { i, v ->
-            val k = "g:${v.id}"
-            VideoCard(
-                v,
-                width = null,
-                modifier = focusMod(k),
-                onFocused = { vm.lastFocused = k },
-                onClick = { nav.play(picks, i) },
-                onLongClick = { menu = v to null },
-            )
-        }
-        if (gridLoading) item(key = "gridLoading", span = { GridItemSpan(maxLineSpan) }) {
-            Loading(Modifier.fillMaxWidth().padding(24.dp))
-        }
-    }
-
-    menu?.let { (v, h) ->
-        VideoMenu(
+    @Composable
+    fun Card(shelf: HomeShelf, i: Int, v: Video, modifier: Modifier = Modifier, width: Dp? = 196.dp) {
+        val k = "${shelf.key}:${v.id}"
+        VideoCard(
             v,
-            onDismiss = { menu = null },
-            extra = if (h != null) listOf(DialogAction("Retirer de « Reprendre la lecture »", destructive = true) {
-                menu = null
-                vm.removeFromHistory(h)
-            }) else emptyList(),
+            width = width,
+            progress = progress[v.id],
+            modifier = modifier.then(focusMod(k)).then(if (shelf === list.first() && i == 0) Modifier.focusRequester(firstRequester) else Modifier),
+            onFocused = {
+                vm.lastFocused = k
+                preview = v to shelf.title
+            },
+            onClick = { nav.play(shelf.videos, i) },
+            onLongClick = { menu = v },
         )
     }
+
+    val fold by animateFloatAsState(if (inBlock) 1f else 0f, tween(250), label = "fold")
+    val default = LocalBringIntoViewSpec.current
+
+    Box(Modifier.fillMaxSize()) {
+        val (video, label) = preview ?: (list.first().videos.first() to list.first().title)
+        Preview(video, label) { fold }
+
+        CompositionLocalProvider(LocalBringIntoViewSpec provides AlignToTop) {
+            LazyColumn(
+                state = state,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(top = RowsTop - Fold)
+                    // The list is laid out for the folded preview and slides down while the preview shows.
+                    .graphicsLayer { translationY = Fold.toPx() * (1f - fold) }
+                    .focusRequester(shell.homeEntry)
+                    // "Up" from the first shelf finds nothing above it in the list: go to the tab bar.
+                    .onPreviewKeyEvent { ev ->
+                        if (ev.type != KeyEventType.KeyDown || ev.key != Key.DirectionUp) return@onPreviewKeyEvent false
+                        if (!focusManager.moveFocus(FocusDirection.Up)) shell.focusTabs()
+                        true
+                    },
+                contentPadding = PaddingValues(bottom = 300.dp),
+            ) {
+                items(list, key = { it.key }) { shelf ->
+                    // Inside a shelf, rows scroll the usual way.
+                    CompositionLocalProvider(LocalBringIntoViewSpec provides default) {
+                        Column(
+                            Modifier
+                                .wholeShelfIntoView()
+                                .onFocusChanged { if (it.hasFocus) inBlock = shelf.twoLines }
+                                .padding(bottom = 6.dp)
+                        ) {
+                            Text(shelf.title, style = T.Title3, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(horizontal = Gutter))
+                            if (shelf.twoLines) {
+                                Column(
+                                    Modifier.focusRestorer().padding(start = Gutter, end = Gutter, top = 14.dp, bottom = 8.dp),
+                                    verticalArrangement = Arrangement.spacedBy(16.dp),
+                                ) {
+                                    shelf.videos.chunked(BlockColumns).forEachIndexed { line, videos ->
+                                        Row(horizontalArrangement = Arrangement.spacedBy(22.dp)) {
+                                            videos.forEachIndexed { j, v -> Card(shelf, line * BlockColumns + j, v, Modifier.weight(1f), width = null) }
+                                            repeat(BlockColumns - videos.size) { Spacer(Modifier.weight(1f)) }
+                                        }
+                                    }
+                                }
+                            } else {
+                                LazyRow(
+                                    modifier = Modifier.focusRestorer(),
+                                    contentPadding = PaddingValues(start = Gutter, end = Gutter, top = 14.dp, bottom = 8.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(22.dp),
+                                ) {
+                                    itemsIndexed(shelf.videos, key = { _, v -> shelf.key + v.id }) { i, v -> Card(shelf, i, v) }
+                                }
+                            }
+                        }
+                    }
+                }
+                item(key = "end") {
+                    Row(
+                        Modifier
+                            .wholeShelfIntoView()
+                            .onFocusChanged { if (it.hasFocus) inBlock = false }
+                            .padding(horizontal = Gutter)
+                            .padding(top = 8.dp)
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(C.Surface)
+                            .padding(horizontal = 24.dp, vertical = 18.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(14.dp),
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Vous avez fait le tour de l'accueil", style = T.Headline)
+                            Text("Les rubriques reviennent avec de nouvelles vidéos à chaque visite.", style = T.Footnote, color = C.Text2)
+                        }
+                        PillButton("Explorer d'autres sujets", onClick = { shell.openTab(Tab.EXPLORE) })
+                        PillButton("Actualiser", icon = Icons.Rounded.Refresh, onClick = {
+                            refocus = true
+                            preview = null
+                            inBlock = false
+                            vm.lastFocused = null
+                            vm.load()
+                        })
+                    }
+                }
+            }
+        }
+    }
+
+    menu?.let { v -> VideoMenu(v, onDismiss = { menu = null }) }
 }
 
+/** The focused video, large, at the top of the page; it folds away while a two-line shelf has the focus. */
 @Composable
-private fun Hero(items: List<HeroItem>, vm: HomeViewModel, playMod: Modifier, onFocusHero: () -> Unit) {
-    var index by remember { mutableIntStateOf(vm.heroIndex.coerceIn(0, items.size - 1)) }
-    var focused by remember { mutableStateOf(false) }
-    var focusedButton by remember { mutableIntStateOf(0) }
-    val item = items[index.coerceIn(0, items.size - 1)]
-    val video = item.video
-    val nav = LocalNav.current
-    val shell = LocalShell.current
-    val repo = LocalContainer.current.repository
-    val scope = rememberCoroutineScope()
-    val inLater by remember(video.id) { repo.isInWatchLater(video.id) }.collectAsState(false)
-    var size by remember { mutableStateOf(IntSize.Zero) }
-
-    fun go(delta: Int) {
-        index = (index + delta + items.size) % items.size
-        vm.heroIndex = index
-    }
-
-    // Focusing a hero button asks the list to show the whole hero, which keeps the list scrolled to the top.
-    val showWholeHero = remember {
-        object : BringIntoViewResponder {
-            override fun calculateRectForParent(localRect: Rect): Rect = Rect(Offset.Zero, size.toSize())
-            override suspend fun bringChildIntoView(localRect: () -> Rect?) {}
-        }
-    }
-
-    // Auto-advance like the Apple TV top shelf, paused while the hero has focus.
-    LaunchedEffect(index, focused, items.size) {
-        if (!focused && items.size > 1) {
-            delay(8000)
-            go(1)
-        }
-    }
-
-    Box(Modifier.fillMaxWidth().height(420.dp).onSizeChanged { size = it }.bringIntoViewResponder(showWholeHero)) {
-        Crossfade(targetState = video.id, animationSpec = tween(600), label = "hero") { id ->
-            Box(Modifier.fillMaxSize().background(Brush.linearGradient(listOf(Color(0xFF2A1416), Color(0xFF101014))))) {
-                // maxresdefault is missing for some videos: hq (always present) sits underneath.
-                AsyncImage(model = thumbnailOf(id), contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
-                AsyncImage(model = thumbnailOf(id, high = true), contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
-            }
-        }
+private fun Preview(video: Video, label: String, fold: () -> Float) {
+    Box(Modifier.fillMaxWidth().height(PreviewHeight)) {
         Box(
-            Modifier.fillMaxSize().background(
-                Brush.horizontalGradient(0f to Color(0xF2000000), 0.38f to Color(0xB3000000), 0.72f to Color(0x1A000000), 1f to Color.Transparent)
+            Modifier
+                .align(Alignment.TopEnd)
+                .fillMaxWidth(0.64f)
+                .fillMaxHeight()
+                .graphicsLayer { alpha = 1f - 0.7f * fold() }
+        ) {
+            Crossfade(targetState = video.id, animationSpec = tween(250), label = "preview") { id ->
+                Box(Modifier.fillMaxSize().background(C.Surface)) {
+                    // maxresdefault is missing for some videos: hq (always present) sits underneath.
+                    AsyncImage(model = thumbnailOf(id), contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                    AsyncImage(model = thumbnailOf(id, high = true), contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                }
+            }
+            Box(
+                Modifier.matchParentSize().background(
+                    Brush.horizontalGradient(0f to Color.Black, 0.25f to Color(0xBF000000), 0.7f to Color(0x1A000000), 1f to Color.Transparent)
+                )
             )
-        )
-        Box(Modifier.fillMaxSize().background(Brush.verticalGradient(0f to Color(0x99000000), 0.25f to Color.Transparent, 0.62f to Color.Transparent, 1f to C.Background)))
-
-        Column(Modifier.align(Alignment.BottomStart).padding(start = 56.dp, bottom = 22.dp).width(600.dp)) {
+            Box(Modifier.matchParentSize().background(Brush.verticalGradient(0.5f to Color.Transparent, 0.95f to C.Background)))
+        }
+        Column(
+            Modifier
+                .padding(start = Gutter, top = 84.dp)
+                .width(440.dp)
+                .graphicsLayer {
+                    // Gone in the first part of the fold, so it never shows over the rising shelves.
+                    alpha = (1f - 2.5f * fold()).coerceAtLeast(0f)
+                    translationY = -12.dp.toPx() * fold()
+                }
+        ) {
             Text(
-                item.label,
+                (label + (video.channelName?.let { " · $it" } ?: "")).uppercase(),
                 style = T.Caption.copy(fontWeight = FontWeight.Bold, letterSpacing = 1.6.sp),
                 color = C.Text2,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
             Spacer(Modifier.height(8.dp))
-            Box(Modifier.height(92.dp), contentAlignment = Alignment.BottomStart) {
-                Text(video.title, style = T.LargeTitle.copy(fontSize = 36.sp, lineHeight = 44.sp), maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Box(Modifier.height(68.dp), contentAlignment = Alignment.BottomStart) {
+                Text(video.title, style = T.Title1.copy(fontSize = 26.sp, lineHeight = 34.sp), maxLines = 2, overflow = TextOverflow.Ellipsis)
             }
             Spacer(Modifier.height(10.dp))
-            Row(Modifier.height(28.dp), verticalAlignment = Alignment.CenterVertically) {
-                Avatar(video.channelAvatar, 24.dp)
-                Spacer(Modifier.width(10.dp))
+            Row(Modifier.height(24.dp), verticalAlignment = Alignment.CenterVertically) {
+                Avatar(video.channelAvatar, 22.dp)
+                Spacer(Modifier.width(8.dp))
                 Text(video.metaLine(withChannel = true), style = T.Callout, color = C.Text2, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            }
-            Spacer(Modifier.height(20.dp))
-            Row(
-                Modifier
-                    .onFocusChanged {
-                        focused = it.hasFocus
-                        if (it.hasFocus) onFocusHero()
-                    }
-                    .onPreviewKeyEvent { ev ->
-                        if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-                        when {
-                            ev.key == Key.DirectionLeft && focusedButton == 0 && items.size > 1 -> { go(-1); true }
-                            ev.key == Key.DirectionRight && focusedButton == 1 && items.size > 1 -> { go(1); true }
-                            else -> false
-                        }
-                    },
-                horizontalArrangement = Arrangement.spacedBy(14.dp),
-            ) {
-                PillButton(
-                    "Lecture",
-                    onClick = { nav.play(items.map { it.video }, index) },
-                    icon = Icons.Rounded.PlayArrow,
-                    primary = true,
-                    modifier = playMod,
-                    onFocusChange = { if (it) focusedButton = 0 },
-                )
-                PillButton(
-                    if (inLater) "Dans « Plus tard »" else "Plus tard",
-                    onClick = {
-                        scope.launch {
-                            val added = repo.toggleWatchLater(video, inLater)
-                            shell.toast(if (added) "Ajoutée à « À regarder plus tard »" else "Retirée de « À regarder plus tard »")
-                        }
-                    },
-                    icon = if (inLater) Icons.Rounded.Check else Icons.Rounded.Add,
-                    onFocusChange = { if (it) focusedButton = 1 },
-                )
-            }
-        }
-        if (items.size > 1) {
-            Row(Modifier.align(Alignment.BottomEnd).padding(end = 56.dp, bottom = 34.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                items.indices.forEach { i ->
-                    Box(
-                        Modifier
-                            .size(width = if (i == index) 20.dp else 6.dp, height = 6.dp)
-                            .clip(RoundedCornerShape(3.dp))
-                            .background(if (i == index) Color.White else Color(0x59FFFFFF))
-                    )
-                }
             }
         }
     }
