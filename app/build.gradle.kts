@@ -22,10 +22,13 @@ android {
 
     signingConfigs {
         create("release") {
-            storeFile = file("itube-release.jks")
-            storePassword = "itube2026"
-            keyAlias = "itube"
-            keyPassword = "itube2026"
+            // The release keystore and its passwords are secrets: CI writes the keystore
+            // from a repository secret and passes these variables, so the signing key and
+            // its password never live in the repository.
+            storeFile = file(System.getenv("RELEASE_KEYSTORE_FILE") ?: "release.jks")
+            storePassword = System.getenv("RELEASE_KEYSTORE_PASSWORD")
+            keyAlias = System.getenv("RELEASE_KEY_ALIAS")
+            keyPassword = System.getenv("RELEASE_KEY_PASSWORD")
         }
     }
 
