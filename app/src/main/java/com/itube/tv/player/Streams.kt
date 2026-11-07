@@ -92,7 +92,8 @@ object StreamSelector {
     fun pickVideo(info: StreamInfo, maxHeight: Int, pref: CodecPref): VideoStream? {
         val codecs = order(pref)
         val all = playable(info, pref)
-        val fitting = all.filter { it.height <= maxHeight }.ifEmpty { all.filter { it.height == all.minOf { s -> s.height } } }
+        val minHeight = all.minOfOrNull { it.height } ?: return null
+        val fitting = all.filter { it.height <= maxHeight }.ifEmpty { all.filter { it.height == minHeight } }
         return fitting.sortedWith(
             compareByDescending<VideoStream> { it.height }
                 .thenBy { codecs.indexOf(it.codecFamily()) }
