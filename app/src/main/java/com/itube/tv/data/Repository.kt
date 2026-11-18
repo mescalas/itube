@@ -30,6 +30,7 @@ import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import org.xmlpull.v1.XmlPullParser
 import java.time.OffsetDateTime
+import java.util.concurrent.atomic.AtomicInteger
 
 sealed interface FeedState {
     data object Idle : FeedState
@@ -47,7 +48,10 @@ class Repository(
     private val feedState = MutableStateFlow<FeedState>(FeedState.Idle)
     val feedRefresh: StateFlow<FeedState> = feedState.asStateFlow()
     private var refreshJob: Job? = null
-    private var lastRefresh = 0L
+
+    /** Earliest time [refreshFeedIfStale] may start a run; set from the outcome of the previous one. */
+    @Volatile
+    private var nextRefreshAt = 0L
 
     // ------------------------------------------------------------------ subscriptions
 
@@ -86,7 +90,7 @@ class Repository(
         }
 
     fun refreshFeedIfStale() {
-        if (System.currentTimeMillis() - lastRefresh > 20 * 60_000) refreshFeed()
+        if (System.currentTimeMillis() >= nextRefreshAt) refreshFeed()
     }
 
     fun refreshFeed() {
@@ -94,22 +98,24 @@ class Repository(
         refreshJob = scope.launch {
             val subs = db.subscriptions().list()
             if (subs.isEmpty()) return@launch
-            lastRefresh = System.currentTimeMillis()
-            var done = 0
-            var failures = 0
+            val done = AtomicInteger()
+            val failures = AtomicInteger()
             feedState.value = FeedState.Refreshing(0, subs.size)
             val gate = Semaphore(6)
             subs.map { s ->
                 async {
                     gate.withPermit {
-                        if (runCatching { refreshChannel(s.channelId) }.isFailure) failures++
-                        done++
-                        feedState.value = FeedState.Refreshing(done, subs.size)
+                        if (runCatching { refreshChannel(s.channelId) }.isFailure) failures.incrementAndGet()
+                        feedState.value = FeedState.Refreshing(done.incrementAndGet(), subs.size)
                     }
                 }
             }.awaitAll()
             db.feed().deleteOrphans()
-            feedState.value = if (failures == subs.size) FeedState.Failed("Impossible d'actualiser les abonnements.") else FeedState.Idle
+            // A run where every channel failed fetched nothing, so it must not hold off the next
+            // foreground trigger for the whole interval: retry soon instead.
+            val allFailed = failures.get() == subs.size
+            nextRefreshAt = System.currentTimeMillis() + if (allFailed) FAILED_RETRY_MS else REFRESH_INTERVAL_MS
+            feedState.value = if (allFailed) FeedState.Failed("Impossible d'actualiser les abonnements.") else FeedState.Idle
         }
     }
 
@@ -228,5 +234,13 @@ class Repository(
             if (v.id !in seen && !v.isShort && !v.isLive) out.putIfAbsent(v.id, v)
         }
         out.values.take(30)
+    }
+
+    private companion object {
+        /** How long a refresh that fetched data is reused before the next foreground trigger looks again. */
+        private const val REFRESH_INTERVAL_MS = 20 * 60_000L
+
+        /** How long a run where every channel failed waits before the next foreground trigger re-attempts. */
+        private const val FAILED_RETRY_MS = 2 * 60_000L
     }
 }
